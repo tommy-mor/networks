@@ -24,22 +24,14 @@
 
   (def starting-word (rand-nth words))
 
-  (defn guess-2 [g]
+  (defn guess [g]
     (into {}
           (map (fn [idx c score] (case score
                                    0 nil
                                    1 nil
                                    2 [idx c])) (range) (:word g) (:marks g))))
-  (defn guess-1 [g]
-    (clojure.set/difference (into #{} (map (fn [c score] (case score
-                                                           0 nil
-                                                           1 c
-                                                           2 nil)) (:word g) (:marks g)))
-                            #{nil}))
-
   (defn calc-response [guesses]
-    (let [somewhere (apply clojure.set/union (map guess-1 guesses))
-          positions (apply merge (map guess-2 guesses))
+    (let [positions (apply merge (map guess guesses))
           regex (re-pattern (apply str (for [i (range 5)]
                                          (get positions i "."))))]
       (rand-nth (filter #(re-find regex %) words))))
