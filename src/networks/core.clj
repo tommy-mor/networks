@@ -20,7 +20,7 @@
           r (json/read-str x :key-fn keyword)]
       r))
 
-  (def session-id (:id (request {:type "hello" :northeastern_username "morriss.t"})))
+  (def session-id (:id (request {:type "hello" :northeastern_username username})))
 
   (def starting-word (rand-nth words))
 
