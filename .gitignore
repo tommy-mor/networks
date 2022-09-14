@@ -1,4 +1,6 @@
-/target
+/target/classes
+/target/*.jar
+/target/stale
 /classes
 /checkouts
 profiles.clj
