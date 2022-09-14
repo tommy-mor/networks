@@ -1,1 +1,2 @@
-target/client
+#!/bin/sh 
+exec java -jar target/*-standalone.jar "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"

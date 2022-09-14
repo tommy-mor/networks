@@ -9,7 +9,5 @@
                  [org.clj-commons/gloss "0.3.0"]
                  [org.clojure/tools.cli "1.0.206"]]
   
-  :plugins [[lein-bin "0.3.5"]] 
   :repl-options {:init-ns networks.core}
-  :main networks.core
-  :bin {:name "client"})
+  :main networks.core)

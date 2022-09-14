@@ -51,8 +51,6 @@
 
 (defn -main [& args]
   (def opts (parse-opts args cli-options))
-  (assert (= 2 (count (:arguments opts))))
-  
   (wordle {:hostname (-> opts :arguments first)
            :username (-> opts :arguments second)
            :encrypted (-> opts :options :encrypted)
