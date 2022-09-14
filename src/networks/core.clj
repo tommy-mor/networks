@@ -43,7 +43,7 @@
                   (request {:type "guess" :id session-id :word (calc-response (:guesses resp))}))
                  resp)))
   
-  (println (:flag final)))
+  (print (:flag final)))
 
 (def cli-options
   [["-p" "--port PORT" "port number" :default :unspecified :parse-fn #(Integer/parseInt %) :id :port]
