@@ -1,6 +1,7 @@
 /target/classes
 /target/stale
 /target/*SNAPSHOT.jar
+/target/repl-port
 /classes
 /checkouts
 profiles.clj

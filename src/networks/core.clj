@@ -15,11 +15,10 @@
 
 (def url (trim-ftp "ftp://ftp.3700.network/"))
 
-(def protocol (gloss/compile-frame (gloss/string :utf-8 :delimiters ["\r\n"])))
+(def login-data {:username "morrisst"
+                 :password "3sNurnEDZX7Q6aHWvdO1"})
 
 (def control (atom nil))
-(def read-control (atom nil))
-
 (defn reset-connection []
   (if (nil? @control)
     (do
@@ -35,19 +34,57 @@
 (comment (reset-connection))
 
 (defn take-stream []
-  (slurp @(s/take! @control :empty)))
+  (let [r (slurp @(s/take! @control :empty))]
+    (println "RECEIVED" r)
+    r))
 
 ;; TODO some requests have two responses
 (defn request [cmd & args]
-  (assert (#{"USER" "PASS"} cmd))
+  (assert (#{"USER" "PASS" "TYPE" "MODE" "STRU" "LIST" "PASV"} cmd))
   (let [tosend (str (clojure.string/join " " (into [cmd] args)) "\r\n")]
     (println "SENDING " tosend)
     
     @(s/put! @control tosend))
   (clojure.string/split (take-stream) #" " 2))
 
-(comment (def req (request "USER" "thmorriss"))
-         (def pwreq (request "PASS" "rst")))
+(defn login []
+  (def req (request "USER" (:username login-data)))
+  (assert (= "331" (first req)))
+  (def pwreq (request "PASS" (:password login-data)))
+  (assert (= "230" (first pwreq))))
+
+(defn shift-add [top bottom]
+  (+ (bit-shift-left top 8)
+     bottom))
+
+(defn parse-pasv-ip [s]
+  (def s s)
+  (let [numbers  (as->
+                     (re-find #"\(.*\)" s) $
+                   (drop 1 $)
+                   (butlast $)
+                   (apply str $)
+                   (clojure.string/split $ #","))
+        ipnums (take 4 numbers)
+        portnums (map #(Integer/parseInt %) (drop 4 numbers))
+        topbits (first portnums)
+        lowerbits (second portnums)]
+    {:host (clojure.string/join "." ipnums)
+     :port (shift-add topbits lowerbits)}))
+
+(defn open-data-channel []
+  (def pasvreq (request "PASV"))
+  (tcp/client (parse-pasv-ip (second pasvreq))))
+
+(defn ls []
+  (login)
+  (assert (= "200" (first (request "TYPE" "I"))))
+  (assert (= "200" (first (request "MODE" "S"))))
+  (assert (= "200" (first (request "STRU" "F"))))
+  (def data @(open-data-channel))
+  (assert (= "150" (first (request "LIST" "."))))
+  (def ls-result (slurp @(s/take! data)))
+  (clojure.string/split ls-result #"\r\n"))
 
 
 (def cli-options [])
