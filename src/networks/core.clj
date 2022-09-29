@@ -59,7 +59,8 @@
 
 ;; TODO some requests have two responses
 (defn request [cmd & args]
-  (assert (#{"USER" "PASS" "TYPE" "MODE" "STRU" "LIST" "PASV" "STOR" "RETR" "DELE"} cmd))
+  (assert (#{"USER" "PASS" "TYPE" "MODE" "STRU" "LIST"
+             "PASV" "STOR" "RETR" "DELE" "RMD" "MKD"} cmd))
   (let [tosend (str (clojure.string/join " " (into [cmd] args)) "\r\n")]
     (println "SENDING " tosend)
     
@@ -153,17 +154,27 @@
   @(s/put! @data file-to-upload)
   (s/close! @data))
 
-(defn dele [dirr]
-  (login)
-  
-  (request "DELE" dirr))
+(defn mkd [dirr] (login) (request "MKD" dirr))
+(defn rmd [dirr] (login) (request "RMD" dirr))
+
+(defn dele [dirr] (login) (request "DELE" dirr))
 
 (comment
-  (stor "/epic.txt" (slurp "epic.txt"))
+  (stor "/my_stuff/epic.txt" "epicn win file")
   (ls "/")
+  (ls "/my_stuff")
   (retr "/hello.txt")
   (retr "/epic.txt")
-  (dele "/epic.txt"))
+  (dele "/epic.txt")
+  
+  (mkd "/my_folder/")
+  (stor "/my_folder/epic.txt" "epicn win filesss")
+  (retr "/my_folder/epic.txt")
+  (ls "/my_folder")
+  (dele "/my_folder/epic.txt")
+  (rmd "/my_folder/")
+  
+  )
 
 (defmulti ftp (fn [fst & r] (keyword fst)))
 (defmethod ftp :ls [_ url]
