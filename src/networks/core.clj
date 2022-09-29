@@ -59,7 +59,7 @@
 
 ;; TODO some requests have two responses
 (defn request [cmd & args]
-  (assert (#{"USER" "PASS" "TYPE" "MODE" "STRU" "LIST" "PASV"} cmd))
+  (assert (#{"USER" "PASS" "TYPE" "MODE" "STRU" "LIST" "PASV" "STOR" "RETR" "DELE"} cmd))
   (let [tosend (str (clojure.string/join " " (into [cmd] args)) "\r\n")]
     (println "SENDING " tosend)
     
@@ -117,7 +117,7 @@
   
   (open-data-channel)
   
-  (def list-req (request "LIST" dirr))
+  (request "LIST" dirr)
 
   (def ls-result @(s/try-take! @data :drained 100 :timeout))
   (if (= ls-result :drained)
@@ -127,20 +127,43 @@
 (comment (ls "/my_stuff")
          (ls "/"))
 
-(def cli-options [])
+(defn retr [dirr]
+  (login)
+  
+  (open-data-channel)
+  
+  (def retr-req (first (request "RETR" dirr)))
+  (cond
+    (#{"550"} retr-req)
+    "failed to open file"
+    
+    (#{"150" "226"} retr-req)
+    (do
+      (def retr-result @(s/try-take! @data :drained 100000 :timeout))
+      (if (= retr-result :drained)
+        nil
+        (slurp retr-result)))))
 
-(defmacro defnDEBUG
-  [name & args]
-  (let [fdecl (if (string? (first args)) (next args) args)
-        fdecl (if (map? (first fdecl)) (rest fdecl) fdecl)
-        fdecl (first args)
-        body (rest args)
-        body (into body (map (fn [sym] `(def ~sym ~sym)) fdecl))]
-    `(defn ~name ~fdecl ~@body)))
+(defn stor [dirr file-to-upload]
+  (login)
+  
+  (open-data-channel)
+  (request "STOR" dirr)
 
+  @(s/put! @data file-to-upload)
+  (s/close! @data))
 
-(defnDEBUG epic-fun [a c d]
-  (* 40 a))
+(defn dele [dirr]
+  (login)
+  
+  (request "DELE" dirr))
+
+(comment
+  (stor "/epic.txt" (slurp "epic.txt"))
+  (ls "/")
+  (retr "/hello.txt")
+  (retr "/epic.txt")
+  (dele "/epic.txt"))
 
 (defmulti ftp (fn [fst & r] (keyword fst)))
 (defmethod ftp :ls [_ url]
