@@ -18,11 +18,16 @@
 (def login-data {:username "morrisst"
                  :password "3sNurnEDZX7Q6aHWvdO1"})
 
+
 (def control (atom nil))
 (def data (atom nil))
 (def logged-in (atom false))
 
 (defn reset-connection []
+  (when-not (nil? @data)
+    (s/close! @data)
+    (reset! data nil))
+  
   (if (nil? @control)
     (do
       (reset! control @(tcp/client {:host url
@@ -40,17 +45,17 @@
 (comment (reset-connection))
 
 (defn take-stream-one []
-  @(s/try-take! @control :drained 500 :empty))
+  @(s/try-take! @control :drained 100 :empty))
 
 (defn take-stream []
-  (let [recieved
+  (let [msgs
         (take-while (partial not= :empty)
-                    (repeatedly take-stream-one))]
-    (def r recieved)
-    (println "received " (count r))
-    (let [final (slurp (last recieved))]
-      (println "RECEIVED" final)
-      final)))
+                    (repeatedly take-stream-one))
+        msgs (map slurp msgs)]
+    (println "received " (count msgs))
+    (doseq [m msgs]
+      (println "RECIEVED" m))
+    (last msgs)))
 
 ;; TODO some requests have two responses
 (defn request [cmd & args]
@@ -94,35 +99,33 @@
     {:host (clojure.string/join "." ipnums)
      :port port}))
 
-(defn respond-227 [req]
-  (reset! data @(tcp/client (parse-pasv-ip (second req))))
-  @data)
+;; (defnDEBUG respond-227 [req]
+;;   (def req req)
+;;   (println "227req" (parse-pasv-ip (second req)))
+;;   (reset! data @(tcp/client (parse-pasv-ip (second req))))
+;;   (println "closed?" (s/closed? @data))
+;;   true)
 
 (defn open-data-channel []
   (def pasvreq (request "PASV"))
   (if (= "227" (first pasvreq))
     (respond-227 pasvreq)
-    (println "not making new channel...")))
+    (throw (ex-info {:req pasvreq}))))
 
 (defn ls [dirr]
-  (def dirr dirr)
   (login)
   
   (open-data-channel)
   
-  (let [list-req (request "LIST" dirr)]
-    (case (first list-req)
-      "150" :okay
-      "227" (respond-227 list-req)
-      "226" :do-nothing?))
-  
-  (println "closed?" (s/closed? @data))
-  
-  (def ls-result (slurp @(s/take! @data)))
-  (println "closed?" (s/closed? @data))
-  (clojure.string/split ls-result #"\r\n"))
+  (def list-req (request "LIST" dirr))
 
-(comment (ls "."))
+  (def ls-result @(s/try-take! @data :drained 100 :timeout))
+  (if (= ls-result :drained)
+    nil
+    (clojure.string/split (slurp ls-result) #"\r\n")))
+
+(comment (ls "/my_stuff")
+         (ls "/"))
 
 (def cli-options [])
 
@@ -145,5 +148,4 @@
 
 (defn -main [& args]
   (def opts (parse-opts args cli-options))
-  (prn opts)
-  )
+  (prn opts))
