@@ -190,13 +190,24 @@
 (def p (new java.net.URI "ftp://bob:s3cr3t@ftp.example.com:34/"))
 (def p (new java.net.URI "ftp://bob:s3cr3t@ftp.example.com/documents/homeworks"))
 
-(defmethod ftp :ls [_ url & _]
+(defn process-uri! [url]
   (reset! uri (new java.net.URI url))
   (reset! control @(tcp/client {:host (. @uri getHost)
                                 :port (case (. @uri getPort)
                                         -1 21
-                                        (. @uri getPort))}))
+                                        (. @uri getPort))})))
+
+(defmethod ftp :ls [_ url & _]
+  (process-uri! url)
   (doall (map println (ls (. @uri getPath)))))
+
+(defmethod ftp :mkdir [_ url & _]
+  (process-uri! url)
+  (mkd (. @uri getPath)))
+
+(defmethod ftp :rmdir [_ url & _]
+  (process-uri! url)
+  (rmd (. @uri getPath)))
 
 (defn -main [& args]
   (let [operation (first args)
