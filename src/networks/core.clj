@@ -189,9 +189,13 @@
 ;; ftp:// [USER[:PASSWORD]@]HOST[:PORT]/PATH
 (def p (new java.net.URI "ftp://bob:s3cr3t@ftp.example.com:34/"))
 (def p (new java.net.URI "ftp://bob:s3cr3t@ftp.example.com/documents/homeworks"))
+(def p (new java.net.URI "other/essay.pdf"))
+(.getScheme p)
+
+(def p (new java.net.URI "test.sh"))
 
 (defn process-uri! [url]
-  (reset! uri (new java.net.URI url))
+  (reset! uri (if (uri? url) url (new java.net.URI url)))
   (reset! control @(tcp/client {:host (. @uri getHost)
                                 :port (case (. @uri getPort)
                                         -1 21
@@ -208,6 +212,20 @@
 (defmethod ftp :rmdir [_ url & _]
   (process-uri! url)
   (rmd (. @uri getPath)))
+
+(defmethod ftp :cp [_ arg1 arg2 & _]
+  (def src (new java.net.URI arg1))
+  (def dest (new java.net.URI arg2))
+
+  (case [(.getScheme src) (.getScheme dest)]
+    ["ftp" nil] (do
+                  (process-uri! src)
+                  (spit (java.io.File. (str dest)) (retr (.getPath src))))
+    [nil "ftp"] (do
+                  (process-uri! dest)
+                  (stor (.getPath dest)
+                        (slurp (java.io.File. (str src)))))
+    :else (throw (Exception. "no ftp involved"))))
 
 (defn -main [& args]
   (let [operation (first args)
