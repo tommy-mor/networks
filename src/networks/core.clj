@@ -13,9 +13,10 @@
       (clojure.string/replace-first #"ftp://" "")
       (clojure.string/replace #"/$" "")))
 
-(def url (trim-ftp "ftp://ftp.3700.network/"))
+(def uri (atom nil))
 
-(def login-data {:username "morrisst"
+
+(def test-login {:username "morrisst"
                  :password "3sNurnEDZX7Q6aHWvdO1"})
 
 
@@ -23,24 +24,24 @@
 (def data (atom nil))
 (def logged-in (atom false))
 
-(defn reset-connection []
-  (when-not (nil? @data)
-    (s/close! @data)
-    (reset! data nil))
-  
-  (if (nil? @control)
-    (do
-      (reset! control @(tcp/client {:host url
-                                    :port 21}))
-      (reset! logged-in false)
-      (slurp @(s/take! @control))
-      #_(reset! read-control (io/decode-stream @control protocol)))
-    (do
-      (s/close! @control)
-      (when @data (s/close! @data))
-      (reset! control nil)
-      (reset! data nil)
-      (reset-connection))))
+(comment (defn reset-connection []
+           (when-not (nil? @data)
+             (s/close! @data)
+             (reset! data nil))
+           
+           (if (nil? @control)
+             (do
+               (reset! control @(tcp/client {:host url
+                                             :port 21}))
+               (reset! logged-in false)
+               (slurp @(s/take! @control))
+               #_(reset! read-control (io/decode-stream @control protocol)))
+             (do
+               (s/close! @control)
+               (when @data (s/close! @data))
+               (reset! control nil)
+               (reset! data nil)
+               (reset-connection)))))
 
 (comment (reset-connection))
 
@@ -67,17 +68,26 @@
     @(s/put! @control tosend))
   (clojure.string/split (take-stream) #" " 2))
 
+(defn uri->login [uri]
+  (if-let [userinfo (. uri getUserInfo)]
+    (if (clojure.string/includes? userinfo ":")
+      (let [[user pw] (clojure.string/split userinfo #":")]
+        {:username user :password pw})
+      {:username userinfo :password ""})
+    {:username "anonymous" :password ""}))
+
 (defn login []
-  (when-not @logged-in
-    (def req (request "USER" (:username login-data)))
-    (assert (= "331" (first req)))
-    (def pwreq (request "PASS" (:password login-data)))
-    (assert (= "230" (first pwreq)))
-    
-    (assert (= "200" (first (request "TYPE" "I"))))
-    (assert (= "200" (first (request "MODE" "S"))))
-    (assert (= "200" (first (request "STRU" "F"))))
-    (reset! logged-in true)))
+  (let [login (uri->login @uri)]
+    (when-not @logged-in
+      (def req (request "USER" (:username login)))
+      (assert (= "331" (first req)))
+      (def pwreq (request "PASS" (:password login)))
+      (assert (= "230" (first pwreq)))
+      
+      (assert (= "200" (first (request "TYPE" "I"))))
+      (assert (= "200" (first (request "MODE" "S"))))
+      (assert (= "200" (first (request "STRU" "F"))))
+      (reset! logged-in true))))
 
 (defn shift-add [top bottom]
   (+ (bit-shift-left top 8)
@@ -100,12 +110,12 @@
     {:host (clojure.string/join "." ipnums)
      :port port}))
 
-;; (defnDEBUG respond-227 [req]
-;;   (def req req)
-;;   (println "227req" (parse-pasv-ip (second req)))
-;;   (reset! data @(tcp/client (parse-pasv-ip (second req))))
-;;   (println "closed?" (s/closed? @data))
-;;   true)
+(defn respond-227 [req]
+  (def req req)
+  (println "227req" (parse-pasv-ip (second req)))
+  (reset! data @(tcp/client (parse-pasv-ip (second req))))
+  (println "closed?" (s/closed? @data))
+  true)
 
 (defn open-data-channel []
   (def pasvreq (request "PASV"))
@@ -172,14 +182,24 @@
   (retr "/my_folder/epic.txt")
   (ls "/my_folder")
   (dele "/my_folder/epic.txt")
-  (rmd "/my_folder/")
-  
-  )
+  (rmd "/my_folder/"))
 
 (defmulti ftp (fn [fst & r] (keyword fst)))
-(defmethod ftp :ls [_ url]
-  (println url))
+
+;; ftp:// [USER[:PASSWORD]@]HOST[:PORT]/PATH
+(def p (new java.net.URI "ftp://bob:s3cr3t@ftp.example.com:34/"))
+(def p (new java.net.URI "ftp://bob:s3cr3t@ftp.example.com/documents/homeworks"))
+
+(defmethod ftp :ls [_ url & _]
+  (reset! uri (new java.net.URI url))
+  (reset! control @(tcp/client {:host (. @uri getHost)
+                                :port (case (. @uri getPort)
+                                        -1 21
+                                        (. @uri getPort))}))
+  (doall (map println (ls (. @uri getPath)))))
 
 (defn -main [& args]
-  (def opts (parse-opts args cli-options))
-  (prn opts))
+  (let [operation (first args)
+        param1 (second args)
+        param2 (nth args 2)]
+    (apply ftp args)))
