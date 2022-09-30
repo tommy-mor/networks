@@ -7,43 +7,12 @@
             [clojure.tools.cli :refer [parse-opts]])
   (:gen-class))
 
-(defn trim-ftp [s]
-  (assert (clojure.string/starts-with? s "ftp://"))
-  (-> s
-      (clojure.string/replace-first #"ftp://" "")
-      (clojure.string/replace #"/$" "")))
-
 (def uri (atom nil))
-
-
-(def test-login {:username "morrisst"
-                 :password "3sNurnEDZX7Q6aHWvdO1"})
 
 
 (def control (atom nil))
 (def data (atom nil))
 (def logged-in (atom false))
-
-(comment (defn reset-connection []
-           (when-not (nil? @data)
-             (s/close! @data)
-             (reset! data nil))
-           
-           (if (nil? @control)
-             (do
-               (reset! control @(tcp/client {:host url
-                                             :port 21}))
-               (reset! logged-in false)
-               (slurp @(s/take! @control))
-               #_(reset! read-control (io/decode-stream @control protocol)))
-             (do
-               (s/close! @control)
-               (when @data (s/close! @data))
-               (reset! control nil)
-               (reset! data nil)
-               (reset-connection)))))
-
-(comment (reset-connection))
 
 (defn take-stream-one []
   @(s/try-take! @control :drained 300 :empty))
@@ -169,30 +138,7 @@
 
 (defn dele [dirr] (login) (request "DELE" dirr))
 
-(comment
-  (stor "/my_stuff/epic.txt" "epicn win file")
-  (ls "/")
-  (ls "/my_stuff")
-  (retr "/hello.txt")
-  (retr "/epic.txt")
-  (dele "/epic.txt")
-  
-  (mkd "/my_folder/")
-  (stor "/my_folder/epic.txt" "epicn win filesss")
-  (retr "/my_folder/epic.txt")
-  (ls "/my_folder")
-  (dele "/my_folder/epic.txt")
-  (rmd "/my_folder/"))
-
 (defmulti ftp (fn [fst & r] (keyword fst)))
-
-;; ftp:// [USER[:PASSWORD]@]HOST[:PORT]/PATH
-(def p (new java.net.URI "ftp://bob:s3cr3t@ftp.example.com:34/"))
-(def p (new java.net.URI "ftp://bob:s3cr3t@ftp.example.com/documents/homeworks"))
-(def p (new java.net.URI "other/essay.pdf"))
-(.getScheme p)
-
-(def p (new java.net.URI "test.sh"))
 
 (defn process-uri! [url]
   (reset! uri (if (uri? url) url (new java.net.URI url)))

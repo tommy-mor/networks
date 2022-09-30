@@ -1,8 +1,13 @@
-high level approach: use the manifold clojure stream library (and its tcp client).
+all of the code is in src/networks/core.clj
 
-the wordle strategy just takes the wordlist and filters it based first on a regex built up from the correct letters (core.clj:43).
-it does not use the half-correct guesses to filter. Then it choses a random word in the remaining list.
+problem i faced:
+  some commands returned two responses.
+    that was tricky to handle, because i was getting the second response of the first command when I wanted the first response of the second command. I got around this by polling in a loop (core.clj:22)
 
-challenges faced were getting the exact correct amount of bytes from the stream. To do this I used the library [gloss](https://troywest.com/2013/10/22/by-example-gloss.html), which allows for describing a byte protocol declaratively.
+other than that was pretty straightforward.
 
-this let me describe the byte protocol as utf-8 string, null-terminated by a newline. (core.clj:12)
+I tested by running commands in the clojure repl and seeing what they did.
+then I made some scripts to test the moving logic and cli arg parsing.
+then I uploaded to gradescope.
+
+for parsing the url, i just used java.net.URI. java is epic
