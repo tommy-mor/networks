@@ -46,7 +46,7 @@
 (comment (reset-connection))
 
 (defn take-stream-one []
-  @(s/try-take! @control :drained 100 :empty))
+  @(s/try-take! @control :drained 300 :empty))
 
 (defn take-stream []
   (let [msgs
@@ -213,6 +213,10 @@
   (process-uri! url)
   (rmd (. @uri getPath)))
 
+(defmethod ftp :rm [_ url & _]
+  (process-uri! url)
+  (dele (. @uri getPath)))
+
 (defmethod ftp :cp [_ arg1 arg2 & _]
   (def src (new java.net.URI arg1))
   (def dest (new java.net.URI arg2))
@@ -225,6 +229,17 @@
                   (process-uri! dest)
                   (stor (.getPath dest)
                         (slurp (java.io.File. (str src)))))
+    :else (throw (Exception. "no ftp involved"))))
+
+(defmethod ftp :mv [_ arg1 arg2 & _]
+  (ftp :cp arg1 arg2)
+  
+  (def src (new java.net.URI arg1))
+  (def dest (new java.net.URI arg2))
+
+  (case [(.getScheme src) (.getScheme dest)]
+    ["ftp" nil] (dele (.getPath src))
+    [nil "ftp"] (.delete (java.io.File. (str src)))
     :else (throw (Exception. "no ftp involved"))))
 
 (defn -main [& args]
