@@ -1,25 +1,49 @@
 (ns networks.core
-  (:require [aleph.tcp :as tcp]
+  (:require [aleph.udp :as udp]
             [manifold.stream :as s]
-            [clojure.data.json :as json]
-            [gloss.core :as gloss]
-            [gloss.io :as io]
-            [clojure.tools.cli :refer [parse-opts]])
+            [manifold.deferred :as d]
+            [clojure.data.json :as json])
   (:gen-class))
 
 (def inputs
-  (atom (list {:port 7833, :ip "1.2.3.2", :purpose "cust"}
-              {:port 2374, :ip "192.168.0.2", :purpose "peer"}
-              {:port 1293, :ip "67.32.9.2", :purpose "prov"})))
+  (atom (list {:port 59484, :ip "192.168.0.2", :purpose "cust"}
+              {:port 51646, :ip "172.168.0.2", :purpose "cust"})))
+
+(defn oneify-ip [ip]
+  (clojure.string/join "." (let [d (clojure.string/split ip #"\.")]
+                             (conj (vec (butlast d)) (str (dec (Integer. (last d))))))))
+
+(assert (= "1.2.3.1" (oneify-ip "1.2.3.2")))
+(assert (= "192.168.0.1" (oneify-ip "192.168.0.2")))
+
+(s/consume #(println "received!" (String. (:message %)))
+           (-> @inputs second :socket))
+
+(comment @(s/put! (-> @inputs first :socket)
+                 {:host "localhost"
+                  :port (-> @inputs second :port)
+                  :message "hello"})
+
+         (String. (:message @(s/take! (-> @inputs second :socket)))))
+
 
 (def asn (atom 7))
 
+(defn handshake []
+
+  (reset! inputs (for [{:keys [port] :as input}  @inputs]
+                   (assoc input :socket @(udp/socket {:port port}))))
+  (prn @inputs))
+
 ;; TODO some requests have two responses
-(defn -main [asn & relationships]
-  (reset! asn (Integer. asn))
+(defn -main [asn-str & relationships]
+  (reset! asn (Integer. asn-str))
   (reset! inputs (for [rel relationships
                        :when (> (count rel) 0)]
                    (let [[port ip purpose]
                          (clojure.string/split rel #"-")]
                      {:port (Integer. port) :ip ip :purpose purpose})))
-  (println "i am running :3"))
+
+  (prn @inputs)
+
+  (handshake))
