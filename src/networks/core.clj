@@ -25,9 +25,10 @@
 
 (defn process-message [idx msg]
   (def msg msg)
-
-  (println (json/read-str (String. (:message msg))
-                          :key-fn keyword)))
+  (let [recv (json/read-str (String. (:message msg))
+                            :key-fn keyword)]
+    (println idx "received-message" recv )
+    (swap! message-log conj recv)))
 
 (comment
   (close)
@@ -35,23 +36,29 @@
   (s/consume (partial process-message 2) (-> @inputs second :socket)))
 
 (comment @(s/put! (-> @inputs first :socket)
-                 {:host "localhost"
-                  :port (-> @inputs second :port)
-                  :message (json/write-str {:test 3})})
+                  {:host "localhost"
+                   :port (-> @inputs second :port)
+                   :message (json/write-str {:test 3})})
+         @(s/put! (-> @inputs second :socket)
+                  {:host "localhost"
+                   :port (-> @inputs first :port)
+                   :message (json/write-str {:test 3})})
 
          (String. (:message @(s/take! (-> @inputs second :socket)))))
 
 
 (def asn (atom 7))
 
-(defn process-json [inp]
-  (prn inp)
-  inp)
-
 (defn handshake []
 
   (reset! inputs (for [{:keys [port] :as input}  @inputs]
                    (assoc input :socket @(udp/socket {:port port}))))
+  (doall (map (fn [idx {:keys [socket]}]
+                (s/consume (partial process-message idx)
+                           socket))
+              (range)
+              @inputs))
+  
   (prn @inputs))
 
 ;; TODO some requests have two responses
