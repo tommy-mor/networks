@@ -13,21 +13,40 @@
   (clojure.string/join "." (let [d (clojure.string/split ip #"\.")]
                              (conj (vec (butlast d)) (str (dec (Integer. (last d))))))))
 
+(defn close []
+  (doseq [{:keys [socket]} @inputs]
+    (when socket
+      (s/close! socket))))
+
 (assert (= "1.2.3.1" (oneify-ip "1.2.3.2")))
 (assert (= "192.168.0.1" (oneify-ip "192.168.0.2")))
 
-(s/consume #(println "received!" (String. (:message %)))
-           (-> @inputs second :socket))
+(def message-log (atom []))
+
+(defn process-message [idx msg]
+  (def msg msg)
+
+  (println (json/read-str (String. (:message msg))
+                          :key-fn keyword)))
+
+(comment
+  (close)
+  (handshake)
+  (s/consume (partial process-message 2) (-> @inputs second :socket)))
 
 (comment @(s/put! (-> @inputs first :socket)
                  {:host "localhost"
                   :port (-> @inputs second :port)
-                  :message "hello"})
+                  :message (json/write-str {:test 3})})
 
          (String. (:message @(s/take! (-> @inputs second :socket)))))
 
 
 (def asn (atom 7))
+
+(defn process-json [inp]
+  (prn inp)
+  inp)
 
 (defn handshake []
 
