@@ -28,12 +28,12 @@
   (let [recv (json/read-str (String. (:message msg))
                             :key-fn keyword)]
     (println idx "received-message" recv )
-    (swap! message-log conj recv)))
+    (swap! message-log conj recv)
+    (comment "TODO MAKE HANDLE FUNCTION HERE")))
 
 (comment
   (close)
-  (handshake)
-  (s/consume (partial process-message 2) (-> @inputs second :socket)))
+  (handshake))
 
 (comment @(s/put! (-> @inputs first :socket)
                   {:host "localhost"
@@ -61,6 +61,17 @@
   
   (prn @inputs))
 
+(defn send-handshakes []
+  (doall (for [{:keys [port ip socket]} @inputs]
+           @(s/put! socket {:host "localhost"
+                            :port port
+                            :message (json/write-str {:src (oneify-ip ip)
+                                                      :dst ip
+                                                      :type "handshake"
+                                                      :msg {}})}))))
+(comment
+  (send-handshakes))
+
 ;; TODO some requests have two responses
 (defn -main [asn-str & relationships]
   (reset! asn (Integer. asn-str))
@@ -72,4 +83,5 @@
 
   (prn @inputs)
 
-  (handshake))
+  (handshake)
+  (send-handshakes))
