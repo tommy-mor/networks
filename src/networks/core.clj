@@ -51,26 +51,22 @@
 
 (defn handshake []
 
-  (reset! inputs (for [{:keys [port] :as input}  @inputs]
-                   (assoc input :socket @(udp/socket {:port port}))))
+  (reset! inputs (doall (for [{:keys [port ip] :as input}  @inputs]
+                          (let [socket @(udp/socket {:epoll? true})]
+                            @(s/put! socket {:host "localhost"
+                                             :port port
+                                             :message (json/write-str {:src (oneify-ip ip)
+                                                                       :dst ip
+                                                                       :type "handshake"
+                                                                       :msg {}})})
+                            (assoc input :socket socket)))))
   (doall (map (fn [idx {:keys [socket]}]
                 (s/consume (partial process-message idx)
                            socket))
               (range)
               @inputs))
   
-  (prn @inputs))
-
-(defn send-handshakes []
-  (doall (for [{:keys [port ip socket]} @inputs]
-           @(s/put! socket {:host "localhost"
-                            :port port
-                            :message (json/write-str {:src (oneify-ip ip)
-                                                      :dst ip
-                                                      :type "handshake"
-                                                      :msg {}})}))))
-(comment
-  (send-handshakes))
+  (println "done handshake"))
 
 ;; TODO some requests have two responses
 (defn -main [asn-str & relationships]
@@ -84,4 +80,5 @@
   (prn @inputs)
 
   (handshake)
-  (send-handshakes))
+  (while true
+    (Thread/sleep 100)))
