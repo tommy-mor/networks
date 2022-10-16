@@ -7,8 +7,7 @@
                  [aleph "0.5.0"]
                  [org.clojure/data.json "2.4.0"]
                  [org.clj-commons/gloss "0.3.0"]
-                 [org.clojure/tools.cli "1.0.206"]
-                 [org.clojars.tommy-mor/defdebug "0.1.0-SNAPSHOT"]]
+                 [org.clojure/tools.cli "1.0.206"]]
   
   :repl-options {:init-ns networks.core}
   :main networks.core)

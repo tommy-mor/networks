@@ -2,17 +2,25 @@
   (:require [manifold.stream :as s]
             [clojure.data.json :as json]))
 
+(defn log [thing]
+  (comment (spit "log.edn"
+                 (str (pr-str thing)
+                      "\n\n") :append true)))
+
 (defn oneify-ip [ip]
   (clojure.string/join "." (let [d (clojure.string/split ip #"\.")]
                              (conj (vec (butlast d)) (str (dec (Integer. (last d))))))))
 
 (assert (= "192.168.0.1" (oneify-ip "192.168.0.2")))
 
+(def o (Object.))
 (defn send-message [{:keys [socket ip port]} msg]
-  @(s/put! socket
-           {:host "localhost"
-            :port port
-            :message (json/write-str msg)}))
+  (log ["sending message to" ip port msg])
+  (println "sending data to" ip "at" port "msg")
+  (println @(s/put! socket
+                    {:host "localhost"
+                     :port port
+                     :message (json/write-str msg)})))
 
 (def asn (atom 7))
 (def neighbors  
@@ -25,15 +33,15 @@
 (def routing-table (atom []))
 (def all-messages (atom []))
 
-(def msg {:type "update",
-          :src "192.168.0.2", ;; my neighbor
-          :dst "192.168.0.1", ;; me
-          :msg {:network "192.168.0.0",  ;the neighbor knows abou tthis network
-                :netmask "255.255.255.0", ;; under this mask
-                :localpref 100,
-                :ASPath [1],
-                :origin "EGP",
-                :selfOrigin true}})
+(def test-msg {:type "update",
+               :src "192.168.0.2", ;; my neighbor
+               :dst "192.168.0.1", ;; me
+               :msg {:network "192.168.0.0",  ;the neighbor knows abou tthis network
+                     :netmask "255.255.255.0", ;; under this mask
+                     :localpref 100,
+                     :ASPath [1],
+                     :origin "EGP",
+                     :selfOrigin true}})
 
 (defn other-neighbors [src]
   (filter #(not= (:ip %) src) @neighbors))
@@ -84,22 +92,34 @@
 (assert (not (entry-applies? "192.168.2.25" {:network "192.168.0.0" :netmask "255.255.255.0"})))
 (assert (entry-applies? "192.168.2.25" {:network "192.168.0.0" :netmask "255.255.0.0"}))
 
-(defn matches [ip]
+(defn matches [table ip]
   "gets the routes in the table that are apply to this ip"
 
-  (filter (comp (partial entry-applies? ip) second) @routing-table))
+  (filter (comp (partial entry-applies? ip) second) table))
 
-(def msg data1)
+(assert (= 1 (count (matches [["192.168.0.2"
+                               {:network "192.168.0.0", :netmask "255.255.255.0"}]]
+                             "192.168.0.3"))))
+
+(comment (matches [["192.168.0.2"
+                    {:network "192.168.0.0", :netmask "255.255.255.0"}]
+                   ["172.168.0.2"
+                    {:network "172.168.0.0", :netmask "255.255.0.0"}]]
+                  "172.168.0.25"))
+
+
 
 
 
 (defmethod process-message :data [msg]
-  (def potential-routes (matches (:dst msg)))
-
-  (cond
-    (= 1 (count potential-routes))
-    (let [[ip _] (first potential-routes)] (send-message (ip->neighbor ip)
-                                                         msg)))
+  (log [@routing-table msg])
+  (log @neighbors)
+  
+  (locking o (let [potential-routes (matches @routing-table (:dst msg))]
+               (cond
+                 (= 1 (count potential-routes))
+                 (let [[ip _] (first potential-routes)] (send-message (ip->neighbor ip)
+                                                                      msg)))))
   "scenario 1: does not have route, gives no route message"
   "scenario 2: exactly one possible route, forward properly"
   "scenario 3: multiple routes, do longest prefix match"

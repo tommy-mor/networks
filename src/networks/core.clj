@@ -11,7 +11,6 @@
 (defn read-message [msg]
   (let [recv (json/read-str (String. (:message msg))
                             :key-fn keyword)]
-    (println "received-message" (pr-str recv) )
     (swap! message-log conj recv)
     (networks.table/process-message recv)))
 
@@ -20,19 +19,21 @@
   (handshake))
 
 
+(def socket (atom nil))
 (defn handshake []
+  (reset! socket @(udp/socket {:port 0}))
 
   (reset! networks.table/neighbors (doall (for [{:keys [port ip] :as input}  @networks.table/neighbors]
-                                            (let [socket @(udp/socket {:epoll? true})]
-                                              @(s/put! socket {:host "localhost"
-                                                               :port port
-                                                               :message (json/write-str {:src (networks.table/oneify-ip ip)
-                                                                                         :dst ip
-                                                                                         :type "handshake"
-                                                                                         :msg {}})})
-                                              (s/consume read-message
-                                                         socket)
-                                              (assoc input :socket socket)))))
+                                            (do
+                                              @(s/put! @socket {:host "localhost"
+                                                                :port port
+                                                                :message (json/write-str {:src (networks.table/oneify-ip ip)
+                                                                                          :dst ip
+                                                                                          :type "handshake"
+                                                                                          :msg {}})})
+                                              #_(s/consume read-message
+                                                           socket)
+                                              (assoc input :socket @socket)))))
   (println "done handshake"))
 
 ;; TODO some requests have two responses
@@ -47,4 +48,4 @@
 
   (handshake)
   (while true
-    (Thread/sleep 100)))
+    (read-message @(s/take! @socket))))
