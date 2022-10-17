@@ -67,6 +67,38 @@
                               :origin ;; TODO there is more logic to be done here
                               :selfOrigin))}))))
 
+(defmethod process-message :withdraw [msg]
+  "save a copy"
+  "remove dead entry"
+  "potentially send to neighboring routers"
+  (log [msg @routing-table])
+  
+  (reset! routing-table (filter #(not ((set (:msg msg))
+                                       (select-keys (second %) [:network :netmask])))
+                                @routing-table))
+
+  (doall (for [neighbor (other-neighbors (:src msg))
+               :let [msg' (assoc msg
+                                 :src (oneify-ip (:src msg))
+                                 :dst (:src msg))]]
+           (send-message neighbor msg')))
+
+  
+
+  (comment (swap! routing-table conj [(:src msg) (:msg msg)])
+
+           (doall (for [neighbor (other-neighbors (:src msg))]
+                    (send-message
+                     neighbor
+                     {:type :update
+                      :src (oneify-ip (:ip neighbor))
+                      :dst (:ip neighbor)
+                      :msg (-> (:msg msg)
+                               (update-in [:ASPath] prepend @asn)
+                               (dissoc :localpref
+                                       :origin ;; TODO there is more logic to be done here
+                                       :selfOrigin))})))))
+
 
 (defn ip->int [ip]
   (apply + (map (fn [base coef] (bit-shift-left base coef))
@@ -104,21 +136,10 @@
 
 (defn measure-route [[_ {:keys [network netmask localpref ASPath origin selfOrigin]}]]
   "high is good"
-  [(ip->int netmask) localpref])
+  [(ip->int netmask) localpref selfOrigin])
 
 (defn best-route [routes]
   (last (sort-by measure-route routes)))
-
-(comment (best-route (vector ["10.0.0.2"
-                              {:network "12.0.0.0", :netmask "255.0.0.0",
-                               :localpref 100, :ASPath [3 4], :origin "EGP", :selfOrigin false}]
-                             ["192.168.0.2"
-                              {:network "12.0.0.0", :netmask "255.0.0.0",
-                               :localpref 150, :ASPath [1 4], :origin "EGP", :selfOrigin false}])))
-
-
-
-
 
 (defmethod process-message :data [msg]
   (let [potential-routes (matches @routing-table (:dst msg))]
@@ -129,11 +150,15 @@
       (< 1 (count potential-routes))
       (let [[ip _] (best-route potential-routes)] (send-message (ip->neighbor ip)
                                                                 msg))
+
+      (empty? potential-routes)
+      (send-message (ip->neighbor (:src msg))
+                    {:src (oneify-ip (:src msg))
+                     :dst (:src msg)
+                     :type "no route"
+                     :msg {}})
       
-      :else (do
-              (log potential-routes)
-              (throw
-               (Exception. "erhm")))))
+      :else (throw (Exception. "impossible"))))
   "scenario 1: does not have route, gives no route message"
   "scenario 2: exactly one possible route, forward properly"
   "scenario 3: multiple routes, do longest prefix match"
