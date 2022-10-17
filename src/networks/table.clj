@@ -96,16 +96,6 @@
                                {:network "192.168.0.0", :netmask "255.255.255.0"}]]
                              "192.168.0.3"))))
 
-(comment (matches [["192.168.0.2"
-                    {:network "192.168.0.0", :netmask "255.255.255.0"}]
-                   ["172.168.0.2"
-                    {:network "172.168.0.0", :netmask "255.255.0.0"}]]
-                  "172.168.0.25"))
-
-
-
-
-
 (defmethod process-message :data [msg]
   (log [@routing-table msg])
   (log @neighbors)
@@ -120,8 +110,6 @@
   "scenario 3: multiple routes, do longest prefix match"
   "check for legality: if source|dest is customer: send data. if source is peer|providor AND dest peer|providor, then drop message . send no route")
 
-(def msg {:src "192.168.0.2", :dst "192.168.0.1", :type "dump", :msg {}})
-
 (defn dump-table [table]
   (for [[peer mp] table]
     (assoc mp :peer peer)))
@@ -129,9 +117,6 @@
 (defmethod process-message :dump [{:keys [src dst]}]
   (send-message (ip->neighbor src)
                 {:src dst :dst src :type "table"
-                 :msg (dump-table @routing-table)})
-  
-  )
+                 :msg (dump-table @routing-table)}))
 
-(comment
-  (process-message update-message))
+
