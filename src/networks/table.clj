@@ -1,11 +1,12 @@
 (ns networks.table
   (:require [manifold.stream :as s]
-            [clojure.data.json :as json]))
+            [clojure.data.json :as json]
+            [clojure.core.match :refer [match]]))
 
 (defn log [thing]
-  (comment (spit "log.edn"
-                 (str (pr-str thing)
-                      "\n\n") :append true)))
+  (spit "log.edn"
+        (str (pr-str thing)
+             "\n\n") :append true))
 
 (defn oneify-ip [ip]
   (clojure.string/join "." (let [d (clojure.string/split ip #"\.")]
@@ -13,14 +14,11 @@
 
 (assert (= "192.168.0.1" (oneify-ip "192.168.0.2")))
 
-(def o (Object.))
 (defn send-message [{:keys [socket ip port]} msg]
-  (log ["sending message to" ip port msg])
-  (println "sending data to" ip "at" port "msg")
-  (println @(s/put! socket
-                    {:host "localhost"
-                     :port port
-                     :message (json/write-str msg)})))
+  @(s/put! socket
+           {:host "localhost"
+            :port port
+            :message (json/write-str msg)}))
 
 (def asn (atom 7))
 (def neighbors  
@@ -70,9 +68,6 @@
                               :selfOrigin))}))))
 
 
-(def data1 {:src "172.168.0.25", :dst "192.168.0.25", :type "data", :msg {:ignore "this"}})
-(def data2 {:src "192.168.0.25", :dst "172.168.0.25", :type "data", :msg {:ignore "this"}})
-
 (defn ip->int [ip]
   (apply + (map (fn [base coef] (bit-shift-left base coef))
                 (map #(Integer/parseInt %) (clojure.string/split ip #"\."))
@@ -115,15 +110,28 @@
   (log [@routing-table msg])
   (log @neighbors)
   
-  (locking o (let [potential-routes (matches @routing-table (:dst msg))]
-               (cond
-                 (= 1 (count potential-routes))
-                 (let [[ip _] (first potential-routes)] (send-message (ip->neighbor ip)
-                                                                      msg)))))
+  (let [potential-routes (matches @routing-table (:dst msg))]
+    (cond
+      (= 1 (count potential-routes))
+      (let [[ip _] (first potential-routes)] (send-message (ip->neighbor ip)
+                                                           msg))))
   "scenario 1: does not have route, gives no route message"
   "scenario 2: exactly one possible route, forward properly"
   "scenario 3: multiple routes, do longest prefix match"
   "check for legality: if source|dest is customer: send data. if source is peer|providor AND dest peer|providor, then drop message . send no route")
+
+(def msg {:src "192.168.0.2", :dst "192.168.0.1", :type "dump", :msg {}})
+
+(defn dump-table [table]
+  (for [[peer mp] table]
+    (assoc mp :peer peer)))
+
+(defmethod process-message :dump [{:keys [src dst]}]
+  (send-message (ip->neighbor src)
+                {:src dst :dst src :type "table"
+                 :msg (dump-table @routing-table)})
+  
+  )
 
 (comment
   (process-message update-message))

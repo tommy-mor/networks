@@ -11,6 +11,7 @@
 (defn read-message [msg]
   (let [recv (json/read-str (String. (:message msg))
                             :key-fn keyword)]
+    (prn recv)
     (swap! message-log conj recv)
     (networks.table/process-message recv)))
 
