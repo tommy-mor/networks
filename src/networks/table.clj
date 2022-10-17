@@ -96,15 +96,44 @@
                                {:network "192.168.0.0", :netmask "255.255.255.0"}]]
                              "192.168.0.3"))))
 
+(comment (matches [["192.168.0.2"
+                    {:network "192.168.0.0", :netmask "255.255.255.0"}]
+                   ["172.168.0.2"
+                    {:network "172.168.0.0", :netmask "255.255.0.0"}]]
+                  "172.168.0.25"))
+
+(defn measure-route [[_ {:keys [network netmask localpref ASPath origin selfOrigin]}]]
+  "high is good"
+  [(ip->int netmask) localpref])
+
+(defn best-route [routes]
+  (last (sort-by measure-route routes)))
+
+(comment (best-route (vector ["10.0.0.2"
+                              {:network "12.0.0.0", :netmask "255.0.0.0",
+                               :localpref 100, :ASPath [3 4], :origin "EGP", :selfOrigin false}]
+                             ["192.168.0.2"
+                              {:network "12.0.0.0", :netmask "255.0.0.0",
+                               :localpref 150, :ASPath [1 4], :origin "EGP", :selfOrigin false}])))
+
+
+
+
+
 (defmethod process-message :data [msg]
-  (log [@routing-table msg])
-  (log @neighbors)
-  
   (let [potential-routes (matches @routing-table (:dst msg))]
     (cond
       (= 1 (count potential-routes))
       (let [[ip _] (first potential-routes)] (send-message (ip->neighbor ip)
-                                                           msg))))
+                                                           msg))
+      (< 1 (count potential-routes))
+      (let [[ip _] (best-route potential-routes)] (send-message (ip->neighbor ip)
+                                                                msg))
+      
+      :else (do
+              (log potential-routes)
+              (throw
+               (Exception. "erhm")))))
   "scenario 1: does not have route, gives no route message"
   "scenario 2: exactly one possible route, forward properly"
   "scenario 3: multiple routes, do longest prefix match"
