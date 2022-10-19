@@ -191,12 +191,14 @@
 (defn adjacent-numeriacally [a b]
   (def a a)
   (def b b)
-  (println (:network a) (:network b))
   (if (= a b)
     true
-    (zero? (mod (log2 (- (ip->int (:network b))
-                         (ip->int (:network a))))
-                8))))
+    (if (= (:network a)
+           (:network b))
+      false
+      (zero? (mod (log2 (- (ip->int (:network b))
+                           (ip->int (:network a))))
+                  8)))))
 
 (adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.0.1"})
 (adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.1.0"})
@@ -246,6 +248,18 @@
     (assoc a
            :network (int->ip network)
            :netmask (int->ip netmask))))
+
+(defn aggregate [table]
+  (def p (let [last-seen (atom nil)]
+           (partition-by (fn [item]
+                           (let [v (when @last-seen
+                                     (adjacent-numeriacally @last-seen item))]
+                             (reset! last-seen item)
+                             v))
+                         (sort-by #(vector (ip->int (:network %)) (:localpref %) (:selfOrigin %)) table)
+                         )))
+
+  (map (partial reduce new-route) p))
 
 (defmethod process-message :dump [{:keys [src dst]}]
   (send-message (ip->neighbor src)
