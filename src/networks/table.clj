@@ -45,9 +45,6 @@
                      :selfOrigin true}})
 
 (defn other-neighbors [msg neighbors]
-  (log msg)
-  (log neighbors)
-
   (let [source (first (filter #(= (:src msg) (:ip %)) neighbors))
         neighbors (filter #(not= (:ip %) (:src msg))
                           neighbors)]
@@ -56,13 +53,6 @@
       "peer" (filter #(= "cust" (:purpose %)) neighbors)
       "prov" (filter #(= "cust" (:purpose %)) neighbors)
       "cust" neighbors)))
-
-(other-neighbors {:type "update", :src "172.168.0.2", :dst "172.168.0.1", :msg {:network "172.169.0.0", :netmask "255.255.0.0", :localpref 100, :ASPath [2], :origin "EGP", :selfOrigin true}}
-                 
-                 
-                 (list {:port 61919, :ip "192.168.0.2", :purpose "cust" , }
-                       {:port 53384, :ip "172.168.0.2", :purpose "peer" , }
-                       {:port 61807, :ip "10.0.0.2", :purpose "peer" , }))
 
 (defn prepend [coll a]
   (into [a] coll))
@@ -102,7 +92,7 @@
 
   (reset! routing-table (filter-routing-table @routing-table msg))
 
-  (doall (for [neighbor (other-neighbors (:src msg))
+  (doall (for [neighbor (other-neighbors msg @neighbors)
                :let [msg' (assoc msg
                                  :src (oneify-ip (:ip neighbor))
                                  :dst (:ip neighbor))]]
@@ -150,25 +140,39 @@
 (defn best-route [routes]
   (last (sort-by measure-route routes)))
 
+(defn send-message-protected [neighbor msg]
+  (let [source-role (:purpose (port->neighbor (:recv-port (meta msg))))
+        dest-role (:purpose neighbor)]
+
+    (cond
+      (or (= source-role "cust")
+          (= dest-role "cust"))
+      (send-message neighbor msg)
+
+      (and (#{"peer" "prov"} source-role)
+           (#{"peer" "prov"} dest-role))
+      nil
+
+      true
+      (throw (Exception. "should be impossible")))))
+
 (defmethod process-message :data [msg]
   (let [potential-routes (matches @routing-table (:dst msg))]
-    (log potential-routes)
-    (log msg)
     (cond
       (= 1 (count potential-routes))
-      (let [[ip _] (first potential-routes)] (send-message (ip->neighbor ip)
-                                                           msg))
+      (let [[ip _] (first potential-routes)] (send-message-protected (ip->neighbor ip)
+                                                                     msg))
       (< 1 (count potential-routes))
-      (let [[ip _] (best-route potential-routes)] (send-message (ip->neighbor ip)
-                                                                msg))
+      (let [[ip _] (best-route potential-routes)] (send-message-protected (ip->neighbor ip)
+                                                                          msg))
 
       (empty? potential-routes)
       (let [{:keys [ip] :as neighbor} (port->neighbor (:recv-port (meta msg)))]
-        (send-message neighbor
-                      {:src (oneify-ip ip)
-                       :dst ip
-                       :type "no route"
-                       :msg {}}))
+        (send-message-protected neighbor
+                                {:src (oneify-ip ip)
+                                 :dst ip
+                                 :type "no route"
+                                 :msg {}}))
       
       :else (throw (Exception. "impossible"))))
   "scenario 1: does not have route, gives no route message"
