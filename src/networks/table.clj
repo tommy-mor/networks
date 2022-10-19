@@ -184,9 +184,72 @@
   (for [[peer mp] table]
     (assoc mp :peer peer)))
 
+(defn log2 [n]
+  (/ (Math/log n)
+     (Math/log 2)))
+
+(defn adjacent-numeriacally [a b]
+  (def a a)
+  (def b b)
+  (println (:network a) (:network b))
+  (if (= a b)
+    true
+    (zero? (mod (log2 (- (ip->int (:network b))
+                         (ip->int (:network a))))
+                8))))
+
+(adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.0.1"})
+(adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.1.0"})
+(adjacent-numeriacally {:network "192.168.2.0"} {:network "192.168.3.0"})
+
+(not (adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.0.2"}))
+(not (adjacent-numeriacally {:network "192.168.1.0"} {:network "192.168.3.0"}))
+
+(defn int->ip [in]
+  (def in in)
+  in
+  (str (bit-shift-right in 24) "."
+       (bit-and
+        (- (bit-shift-left 1 8) 1)
+        (bit-shift-right in 16)) "."
+       (bit-and
+        (- (bit-shift-left 1 8) 1)
+        (bit-shift-right in 8)) "."
+       (bit-and
+        (- (bit-shift-left 1 8) 1)
+        in)))
+
+(int->ip (ip->int  "192.168.2.33"))
+(int->ip (ip->int  "192.168.233.33"))
+(int->ip (ip->int "255.255.255.255"))
+(int->ip (ip->int "255.255.0.255"))
+(int->ip (ip->int "0.0.0.0"))
+(int->ip (ip->int "10.10.10.10"))
+
+(ip->int  "192.168.233.33")
+
+(defn loosen-bitmask [intt]
+  (bit-clear (bit-shift-left intt 1) 32))
+
+(loosen-bitmask (ip->int "255.255.255.255"))
+
+(defn new-route [a b]
+  (let [netmask (loop [bitmask (ip->int (:netmask a))]
+                  (if (= (bit-and (ip->int (:network a))
+                                  bitmask)
+                         (bit-and (ip->int (:network b))
+                                  bitmask))
+                    bitmask
+                    (recur (loosen-bitmask bitmask))))
+        network (bit-and (ip->int (:network a))
+                         netmask)]
+    (assoc a
+           :network (int->ip network)
+           :netmask (int->ip netmask))))
+
 (defmethod process-message :dump [{:keys [src dst]}]
   (send-message (ip->neighbor src)
                 {:src dst :dst src :type "table"
-                 :msg (dump-table @routing-table)}))
+                 :msg (aggregate (dump-table @routing-table))}))
 
 
