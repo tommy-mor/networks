@@ -44,8 +44,25 @@
                      :origin "EGP",
                      :selfOrigin true}})
 
-(defn other-neighbors [src]
-  (filter #(not= (:ip %) src) @neighbors))
+(defn other-neighbors [msg neighbors]
+  (log msg)
+  (log neighbors)
+
+  (let [source (first (filter #(= (:src msg) (:ip %)) neighbors))
+        neighbors (filter #(not= (:ip %) (:src msg))
+                          neighbors)]
+
+    (case (:purpose source)
+      "peer" (filter #(= "cust" (:purpose %)) neighbors)
+      "prov" (filter #(= "cust" (:purpose %)) neighbors)
+      "cust" neighbors)))
+
+(other-neighbors {:type "update", :src "172.168.0.2", :dst "172.168.0.1", :msg {:network "172.169.0.0", :netmask "255.255.0.0", :localpref 100, :ASPath [2], :origin "EGP", :selfOrigin true}}
+                 
+                 
+                 (list {:port 61919, :ip "192.168.0.2", :purpose "cust" , }
+                       {:port 53384, :ip "172.168.0.2", :purpose "peer" , }
+                       {:port 61807, :ip "10.0.0.2", :purpose "peer" , }))
 
 (defn prepend [coll a]
   (into [a] coll))
@@ -58,7 +75,7 @@
 
   (swap! routing-table conj [(:src msg) (:msg msg)])
 
-  (doall (for [neighbor (other-neighbors (:src msg))]
+  (doall (for [neighbor (other-neighbors msg @neighbors)]
            (send-message
             neighbor
             {:type :update
@@ -83,31 +100,13 @@
   "remove dead entry"
   "potentially send to neighboring routers"
 
-  (log msg)
-  (log @routing-table)
   (reset! routing-table (filter-routing-table @routing-table msg))
 
   (doall (for [neighbor (other-neighbors (:src msg))
                :let [msg' (assoc msg
                                  :src (oneify-ip (:ip neighbor))
                                  :dst (:ip neighbor))]]
-           (send-message neighbor msg')))
-
-  
-
-  (comment (swap! routing-table conj [(:src msg) (:msg msg)])
-
-           (doall (for [neighbor (other-neighbors (:src msg))]
-                    (send-message
-                     neighbor
-                     {:type :update
-                      :src (oneify-ip (:ip neighbor))
-                      :dst (:ip neighbor)
-                      :msg (-> (:msg msg)
-                               (update-in [:ASPath] prepend @asn)
-                               (dissoc :localpref
-                                       :origin ;; TODO there is more logic to be done here
-                                       :selfOrigin))})))))
+           (send-message neighbor msg'))))
 
 
 (defn ip->int [ip]
@@ -153,6 +152,8 @@
 
 (defmethod process-message :data [msg]
   (let [potential-routes (matches @routing-table (:dst msg))]
+    (log potential-routes)
+    (log msg)
     (cond
       (= 1 (count potential-routes))
       (let [[ip _] (first potential-routes)] (send-message (ip->neighbor ip)
