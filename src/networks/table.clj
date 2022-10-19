@@ -28,6 +28,9 @@
 (defn ip->neighbor [ip]
   (first (filter (comp #{ip} :ip) @neighbors)))
 
+(defn port->neighbor [port]
+  (first (filter (comp #{port} :port) @neighbors)))
+
 (def routing-table (atom []))
 (def all-messages (atom []))
 
@@ -67,20 +70,27 @@
                               :origin ;; TODO there is more logic to be done here
                               :selfOrigin))}))))
 
+(defn filter-routing-table [table msg]
+  (filter
+   #(not (and
+          (= (first %) (:src msg))
+          ((set (:msg msg))
+           (select-keys (second %) [:network :netmask]))))
+   table))
+
 (defmethod process-message :withdraw [msg]
   "save a copy"
   "remove dead entry"
   "potentially send to neighboring routers"
-  (log [msg @routing-table])
-  
-  (reset! routing-table (filter #(not ((set (:msg msg))
-                                       (select-keys (second %) [:network :netmask])))
-                                @routing-table))
+
+  (log msg)
+  (log @routing-table)
+  (reset! routing-table (filter-routing-table @routing-table msg))
 
   (doall (for [neighbor (other-neighbors (:src msg))
                :let [msg' (assoc msg
-                                 :src (oneify-ip (:src msg))
-                                 :dst (:src msg))]]
+                                 :src (oneify-ip (:ip neighbor))
+                                 :dst (:ip neighbor))]]
            (send-message neighbor msg')))
 
   
@@ -152,11 +162,12 @@
                                                                 msg))
 
       (empty? potential-routes)
-      (send-message (ip->neighbor (:src msg))
-                    {:src (oneify-ip (:src msg))
-                     :dst (:src msg)
-                     :type "no route"
-                     :msg {}})
+      (let [{:keys [ip] :as neighbor} (port->neighbor (:recv-port (meta msg)))]
+        (send-message neighbor
+                      {:src (oneify-ip ip)
+                       :dst ip
+                       :type "no route"
+                       :msg {}}))
       
       :else (throw (Exception. "impossible"))))
   "scenario 1: does not have route, gives no route message"

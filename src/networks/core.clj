@@ -10,8 +10,9 @@
 
 (defn read-message [msg]
   (let [recv (json/read-str (String. (:message msg))
-                            :key-fn keyword)]
-    (prn recv)
+                            :key-fn keyword)
+        ;; only used for empty message callback
+        recv (with-meta recv {:recv-port (.getPort (:sender msg))})]
     (swap! message-log conj recv)
     (networks.table/process-message recv)))
 
