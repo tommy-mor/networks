@@ -16,12 +16,8 @@
     (swap! message-log conj recv)
     (networks.table/process-message recv)))
 
-(comment
-  (close)
-  (handshake))
-
-
 (def socket (atom nil))
+
 (defn handshake []
   (reset! socket @(udp/socket {:port 0}))
 

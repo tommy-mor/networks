@@ -34,16 +34,6 @@
 (def routing-table (atom []))
 (def all-messages (atom []))
 
-(def test-msg {:type "update",
-               :src "192.168.0.2", ;; my neighbor
-               :dst "192.168.0.1", ;; me
-               :msg {:network "192.168.0.0",  ;the neighbor knows abou tthis network
-                     :netmask "255.255.255.0", ;; under this mask
-                     :localpref 100,
-                     :ASPath [1],
-                     :origin "EGP",
-                     :selfOrigin true}})
-
 (defn other-neighbors [msg neighbors]
   (let [source (first (filter #(= (:src msg) (:ip %)) neighbors))
         neighbors (filter #(not= (:ip %) (:src msg))
@@ -104,9 +94,9 @@
                 (map #(Integer/parseInt %) (clojure.string/split ip #"\."))
                 [24 16 8 0])))
 
-(assert (= (ip->int "255.255.255.255") 2r11111111111111111111111111111111))
-(assert (= (ip->int "255.255.255.0") 2r11111111111111111111111100000000))
-(assert (= (ip->int "255.255.0.0") 2r11111111111111110000000000000000))
+(comment (assert (= (ip->int "255.255.255.255") 2r11111111111111111111111111111111))
+         (assert (= (ip->int "255.255.255.0") 2r11111111111111111111111100000000))
+         (assert (= (ip->int "255.255.0.0") 2r11111111111111110000000000000000)))
 
 (defn entry-applies? [ip entry]
   (= (bit-and (ip->int (:network entry))
@@ -114,24 +104,23 @@
      (bit-and (ip->int ip)
               (ip->int (:netmask entry)))))
 
-(assert (entry-applies? "192.168.0.25" {:network "192.168.0.0" :netmask "255.255.255.0"}))
-(assert (not (entry-applies? "192.168.2.25" {:network "192.168.0.0" :netmask "255.255.255.0"})))
-(assert (entry-applies? "192.168.2.25" {:network "192.168.0.0" :netmask "255.255.0.0"}))
+(comment (assert (entry-applies? "192.168.0.25" {:network "192.168.0.0" :netmask "255.255.255.0"}))
+         (assert (not (entry-applies? "192.168.2.25" {:network "192.168.0.0" :netmask "255.255.255.0"})))
+         (assert (entry-applies? "192.168.2.25" {:network "192.168.0.0" :netmask "255.255.0.0"})))
 
 (defn matches [table ip]
   "gets the routes in the table that are apply to this ip"
 
   (filter (comp (partial entry-applies? ip) second) table))
 
-(assert (= 1 (count (matches [["192.168.0.2"
-                               {:network "192.168.0.0", :netmask "255.255.255.0"}]]
-                             "192.168.0.3"))))
-
 (comment (matches [["192.168.0.2"
                     {:network "192.168.0.0", :netmask "255.255.255.0"}]
                    ["172.168.0.2"
                     {:network "172.168.0.0", :netmask "255.255.0.0"}]]
-                  "172.168.0.25"))
+                  "172.168.0.25")
+         (= 1 (count (matches [["192.168.0.2"
+                                {:network "192.168.0.0", :netmask "255.255.255.0"}]]
+                              "192.168.0.3"))))
 
 (defn measure-route [[_ {:keys [network netmask localpref ASPath origin selfOrigin]}]]
   "high is good"
@@ -200,12 +189,12 @@
                            (ip->int (:network a))))
                   8)))))
 
-(adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.0.1"})
-(adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.1.0"})
-(adjacent-numeriacally {:network "192.168.2.0"} {:network "192.168.3.0"})
+(comment (adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.0.1"})
+         (adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.1.0"})
+         (adjacent-numeriacally {:network "192.168.2.0"} {:network "192.168.3.0"})
 
-(not (adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.0.2"}))
-(not (adjacent-numeriacally {:network "192.168.1.0"} {:network "192.168.3.0"}))
+         (not (adjacent-numeriacally {:network "192.168.0.0"} {:network "192.168.0.2"}))
+         (not (adjacent-numeriacally {:network "192.168.1.0"} {:network "192.168.3.0"})))
 
 (defn int->ip [in]
   (def in in)
@@ -221,19 +210,19 @@
         (- (bit-shift-left 1 8) 1)
         in)))
 
-(int->ip (ip->int  "192.168.2.33"))
-(int->ip (ip->int  "192.168.233.33"))
-(int->ip (ip->int "255.255.255.255"))
-(int->ip (ip->int "255.255.0.255"))
-(int->ip (ip->int "0.0.0.0"))
-(int->ip (ip->int "10.10.10.10"))
+(comment (int->ip (ip->int  "192.168.2.33"))
+         (int->ip (ip->int  "192.168.233.33"))
+         (int->ip (ip->int "255.255.255.255"))
+         (int->ip (ip->int "255.255.0.255"))
+         (int->ip (ip->int "0.0.0.0"))
+         (int->ip (ip->int "10.10.10.10"))
 
-(ip->int  "192.168.233.33")
+         (ip->int  "192.168.233.33"))
 
 (defn loosen-bitmask [intt]
   (bit-clear (bit-shift-left intt 1) 32))
 
-(loosen-bitmask (ip->int "255.255.255.255"))
+(comment (loosen-bitmask (ip->int "255.255.255.255")))
 
 (defn new-route [a b]
   (let [netmask (loop [bitmask (ip->int (:netmask a))]
