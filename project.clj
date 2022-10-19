@@ -11,4 +11,5 @@
                  [org.clojure/core.match "1.0.0"]]
   
   :repl-options {:init-ns networks.core}
+  :aot :all
   :main networks.core)
