@@ -3,51 +3,78 @@
             [manifold.stream :as s]
             [manifold.deferred :as d]
             [clojure.data.json :as json]
-            [networks.table])
+            [networks.table]
+            [clj-commons.byte-streams :refer [to-byte-arrays convert]]
+            [clojure.data.json :as json])
   (:gen-class))
 
-(def message-log (atom []))
-
-(defn read-message [msg]
-  (let [recv (json/read-str (String. (:message msg))
-                            :key-fn keyword)
-        ;; only used for empty message callback
-        recv (with-meta recv {:recv-port (.getPort (:sender msg))})]
-    (swap! message-log conj recv)
-    (networks.table/process-message recv)))
-
+(def send-socket (atom nil))
 (comment
-  (close)
-  (handshake))
+  (send3700 "127.0.0.1" "56655"))
+
+(defn log [thing]
+  (spit "log.edn"
+        (str (pr-str thing)
+             "\n\n") :append true))
+
+(defn loge [& e]
+  (binding [*out* *err*]
+    (apply println e)))
+
+(defn send-msg [{:keys [socket info]} data]
+  @(s/put! socket (merge info {:message (pr-str data)})))
+
+(defn send3700 [recv_host recv_port]
+  (reset! send-socket {:socket @(udp/socket {:port 0
+                                             :host recv_host})
+                       :info {:port (Integer/parseInt recv_port)
+                              :host recv_host}})
+  
+  (def inp (to-byte-arrays (slurp *in*) {:chunk-size 1375}))
+  (doseq [section inp]
+    (loge "sending a section")
+    (send-msg @send-socket {:data (String. section)})
+    (loge "waiting for ack")
+    (loge (clojure.edn/read-string (String. (:message @(s/take! (:socket @send-socket)))))))
+  
+  (send-msg @send-socket {:done true})
+  (loge "done sent")
+  (loge (String. (:message @(s/take! (:socket @send-socket))))))
 
 
-(def socket (atom nil))
-(defn handshake []
-  (reset! socket @(udp/socket {:port 0}))
+(def recv-socket (atom nil))
+(defn recv3700 []
+  (reset! recv-socket {:socket @(udp/socket {:host "0.0.0.0"})})
+  (loge (str "Bound to port " (Integer/parseInt (last
+                                                 (clojure.string/split
+                                                  (-> (.description (:socket @recv-socket))
+                                                      :sink
+                                                      :connection
+                                                      :local-address) #"\:")))))
+  
+  (loop []
+    (loge "receiving")
+    (def msg @(s/take! (:socket @recv-socket)))
+    
+    (when-not (:info @recv-socket)
+      (swap! recv-socket assoc :info {:port (.getPort (:sender msg))
+                                      :host (.getHostName (:sender msg))}))
+    
+    (def recvd (clojure.edn/read-string (String. (:message msg))))
+    (if (:done recvd)
+      (do
+        (loge "done")
+        (println "")
+        (send-msg @recv-socket {:ack "exit"})
+        (recur))
+      (do
+        (loge "received")
+        (print (:data recvd))
+        (loge "acking")
+        (send-msg @recv-socket {:ack true})
+        (recur)))))
 
-  (reset! networks.table/neighbors (doall (for [{:keys [port ip] :as input}  @networks.table/neighbors]
-                                            (do
-                                              @(s/put! @socket {:host "localhost"
-                                                                :port port
-                                                                :message (json/write-str {:src (networks.table/oneify-ip ip)
-                                                                                          :dst ip
-                                                                                          :type "handshake"
-                                                                                          :msg {}})})
-                                              #_(s/consume read-message
-                                                           socket)
-                                              (assoc input :socket @socket)))))
-  (println "done handshake"))
-
-;; TODO some requests have two responses
-(defn -main [asn-str & relationships]
-  (reset! networks.table/asn (Integer. asn-str))
-  (reset! networks.table/neighbors (for [rel relationships
-                                         :when (> (count rel) 0)]
-                                     (let [[port ip purpose]
-                                           (clojure.string/split rel #"-")]
-                                       {:port (Integer. port) :ip ip :purpose purpose})))
-  (prn @networks.table/neighbors)
-
-  (handshake)
-  (while true
-    (read-message @(s/take! @socket))))
+(defn -main [recvorsend & relationships]
+  (case recvorsend
+    "send" (apply send3700 (filter (complement empty?) relationships))
+    "recv" (apply recv3700 (filter (complement empty?) relationships))))
