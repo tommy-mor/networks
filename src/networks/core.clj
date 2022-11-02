@@ -1,9 +1,51 @@
 (ns networks.core
-  (:require [aleph.udp :as udp]
-            [manifold.stream :as s]
-            [manifold.deferred :as d]
-            [clj-commons.byte-streams :refer [to-byte-arrays convert]])
+  (:require
+   [clj-commons.byte-streams :refer [to-byte-arrays convert]])
+  (:import (java.net InetAddress DatagramPacket DatagramSocket))
   (:gen-class))
+
+(defn loge [& e]
+  (binding [*out* *err*]
+    (apply println e)))
+
+
+;; https://github.com/babashka/babashka/blob/3dfc15f5a40efaec07cba991892c1207a352fab4/test-resources/babashka/statsd.clj
+
+(defn make-socket
+  [port] (new DatagramSocket port))
+
+(defn send-data [socket ip port data]
+  (let [ipaddr (InetAddress/getByName ip)
+        send-packet (new DatagramPacket (.getBytes data) (.length data) ipaddr port)]
+    (.send socket send-packet)))
+
+
+(defn receive
+  "Block until a UDP message is received on the given DatagramSocket, and
+  return the payload message as a string."
+  [^DatagramSocket socket]
+  (let [size (.getReceiveBufferSize socket)
+        buffer (byte-array size)
+        packet (DatagramPacket. buffer size)]
+    
+    (.receive socket packet)
+    
+    {:port (.getPort (.getSocketAddress packet))
+     :host (.getHostName (.getSocketAddress packet))
+     :message
+     (clojure.edn/read-string (String. (.getData packet)
+                                       0 (.getLength packet)))}))
+
+(defn receive-timeout [^DatagramSocket socket timeout]
+  (.setSoTimeout socket 100)
+  (try
+    (receive socket)
+    (catch java.net.SocketTimeoutException e
+      (.setSoTimeout socket 0)
+      :timeout)))
+
+
+
 
 ;; TODO, make last packet have a last:true flag
 (def send-socket (atom nil))
@@ -15,15 +57,13 @@
         (str (pr-str thing)
              "\n\n") :append true))
 
-(defn loge [& e]
-  (binding [*out* *err*]
-    (apply println e)))
-
 (defn send-msg [{:keys [socket info]} data]
-  @(s/put! socket (merge info {:message (pr-str data)})))
+  ;; @(s/put! socket (merge info {:message (pr-str data)}))
+  (send-data socket (:ip info) (:port info) (pr-str data)))
 
 (defn read-msg [{:keys [socket info]}]
-  (clojure.edn/read-string (String. (:message @(s/take! socket)))))
+  ;; (clojure.edn/read-string (String. (:message @(s/take! socket))))
+  (:message (receive socket)))
 
 (def sent (atom #{}))
 (def ackd (atom #{}))
@@ -31,8 +71,7 @@
 (def packets (atom nil))
 
 (defn send3700 [recv_host recv_port]
-  (reset! send-socket {:socket @(udp/socket {:port 0
-                                             :host recv_host})
+  (reset! send-socket {:socket (new DatagramSocket 0 (InetAddress/getByName recv_host))
                        :info {:port (Integer/parseInt recv_port)
                               :host recv_host}})
   
@@ -52,12 +91,15 @@
   (loop [packets packets
          sent #{}
          ackd #{}]
-    (def ack @(s/try-take! (:socket @send-socket) :default 10 :timeout))
+    
+    (def ack (receive-timeout (:socket @send-socket) 10))
+
+    (loge [sent ackd ack])
     
     (cond
       (not= ack :timeout)
       (do
-        (let [ack (clojure.edn/read-string (String. (:message ack)))]
+        (let [ack (:message ack)]
           (loge (str "recvd: " ack))
           (recur packets sent (conj ackd (:ack ack)))))
       
@@ -76,16 +118,11 @@
 
 (def recv-socket (atom nil))
 (defn recv3700 []
-  (reset! recv-socket {:socket @(udp/socket {:host "0.0.0.0"})})
-  (loge (str "Bound to port " (Integer/parseInt (last
-                                                 (clojure.string/split
-                                                  (-> (.description (:socket @recv-socket))
-                                                      :sink
-                                                      :connection
-                                                      :local-address) #"\:")))))
-  
+  (reset! recv-socket {:socket (new DatagramSocket)})
+  (loge (str "Bound to port " (.getLocalPort (:socket @recv-socket))))
   (def numpackets (:packets (read-msg @recv-socket)))
-  (loge (str "num packets" numpackets))
+  
+  (loge (str "num packets " numpackets))
   
   (loop [recvd-packets #{}]
     (if (= numpackets (count (map :num recvd-packets)))
@@ -100,13 +137,12 @@
       
       (do
         
-        (def msg @(s/take! (:socket @recv-socket)))
+        (def msg (receive (:socket @recv-socket)))
         
         (when-not (:info @recv-socket)
-          (swap! recv-socket assoc :info {:port (.getPort (:sender msg))
-                                          :host (.getHostName (:sender msg))}))
+          (swap! recv-socket assoc :info (select-keys msg [:host :port])))
         
-        (def recvd (clojure.edn/read-string (String. (:message msg))))
+        (def recvd (:message msg))
         (loge ["received" (:num recvd)])
         
         (do
