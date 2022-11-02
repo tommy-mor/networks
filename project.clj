@@ -12,7 +12,20 @@
   :repl-options {:init-ns networks.core}
 
   :uberjar-name "networks.jar"
-  :profiles {:uberjar {:aot :all} }
+  :profiles {:uberjar {:aot :all} 
+             :dev {:plugins [[lein-shell "0.5.0"]]}}
 
 
-  :main networks.core)
+  :main networks.core
+  
+  :aliases
+  {"native"
+   ["shell"
+    "native-image" "--report-unsupported-elements-at-runtime" "--no-server" "--no-fallback"
+    "-H:+ReportExceptionStackTraces"
+    "--initialize-at-build-time"
+    "--allow-incomplete-classpath"
+    "-jar" "./target/${:uberjar-name:-${:name}-${:version}-standalone.jar}"
+    "-H:Name=./target/${:name}"]})
+
+

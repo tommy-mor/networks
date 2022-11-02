@@ -4,6 +4,9 @@
   (:import (java.net InetAddress DatagramPacket DatagramSocket))
   (:gen-class))
 
+(set! *warn-on-reflection* true)
+
+
 (defn loge [& e]
   (binding [*out* *err*]
     (apply println e)))
@@ -12,11 +15,11 @@
 ;; https://github.com/babashka/babashka/blob/3dfc15f5a40efaec07cba991892c1207a352fab4/test-resources/babashka/statsd.clj
 
 (defn make-socket
-  [port] (new DatagramSocket port))
+  [port] (new DatagramSocket ^int port))
 
-(defn send-data [socket ip port data]
+(defn send-data [^DatagramSocket socket ip port ^String data]
   (let [ipaddr (InetAddress/getByName ip)
-        send-packet (new DatagramPacket (.getBytes data) (.length data) ipaddr port)]
+        send-packet (DatagramPacket. (.getBytes data) (.length data) ipaddr ^int port)]
     (.send socket send-packet)))
 
 
@@ -30,8 +33,8 @@
     
     (.receive socket packet)
     
-    {:port (.getPort (.getSocketAddress packet))
-     :host (.getHostName (.getSocketAddress packet))
+    {:port (.getPort ^java.net.InetSocketAddress (.getSocketAddress packet))
+     :host (.getHostName ^java.net.InetSocketAddress (.getSocketAddress packet))
      :message
      (clojure.edn/read-string (String. (.getData packet)
                                        0 (.getLength packet)))}))
@@ -70,16 +73,17 @@
 
 (def packets (atom nil))
 
+(type (first (to-byte-arrays "artsarstarstarts" {:chunk-size 10})))
+
 (defn send3700 [recv_host recv_port]
   (reset! send-socket {:socket (new DatagramSocket 0 (InetAddress/getByName recv_host))
                        :info {:port (Integer/parseInt recv_port)
                               :host recv_host}})
-  
   (def packets (reduce conj
                        (clojure.lang.PersistentQueue/EMPTY)
-                       (map #(assoc {}
-                                    :data (String. %1)
-                                    :num %2)
+                       (map (fn [^"[B" a b] (assoc {}
+                                                   :data (String. a)
+                                                   :num b))
                             (to-byte-arrays (slurp *in*) {:chunk-size 1375})
                             (range))))
   
@@ -119,7 +123,7 @@
 (def recv-socket (atom nil))
 (defn recv3700 []
   (reset! recv-socket {:socket (new DatagramSocket)})
-  (loge (str "Bound to port " (.getLocalPort (:socket @recv-socket))))
+  (loge (str "Bound to port " (.getLocalPort ^DatagramSocket (:socket @recv-socket))))
   (def numpackets (:packets (read-msg @recv-socket)))
   
   (loge (str "num packets " numpackets))
