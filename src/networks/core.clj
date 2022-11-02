@@ -25,21 +25,49 @@
 (defn send-msg [{:keys [socket info]} data]
   @(s/put! socket (merge info {:message (pr-str data)})))
 
+(defn read-msg [{:keys [socket info]}]
+  (clojure.edn/read-string (String. (:message @(s/take! socket)))))
+
+(def sent (atom #{}))
+(def ackd (atom #{}))
+
+(def packets (atom nil))
+
 (defn send3700 [recv_host recv_port]
   (reset! send-socket {:socket @(udp/socket {:port 0
                                              :host recv_host})
                        :info {:port (Integer/parseInt recv_port)
                               :host recv_host}})
   
-  (def inp (to-byte-arrays (slurp *in*) {:chunk-size 1375}))
-  (doseq [section (butlast inp)]
-    (loge "sending a section")
-    (send-msg @send-socket {:data (String. section)})
-    (loge "waiting for ack")
-    (loge (clojure.edn/read-string (String. (:message @(s/take! (:socket @send-socket)))))))
-  (send-msg @send-socket {:data (String. (last inp))
-                          :done true}) 
-  (loge (String. (:message @(s/take! (:socket @send-socket))))))
+  (def packets (reduce conj
+                       (clojure.lang.PersistentQueue/EMPTY)
+                       (map #(assoc {}
+                                    :data (String. %1)
+                                    :num %2)
+                            (to-byte-arrays (slurp *in*) {:chunk-size 1375})
+                            (range))))
+  
+  (def allpackets (into #{} (map :num packets)))
+
+  (send-msg @send-socket {:packets (count allpackets)})
+  
+  
+  (loop [packets packets
+         sent #{}
+         ackd #{}]
+    (cond
+      (> 2 (- (count sent) (count ackd)))
+      (do
+        (send-msg @send-socket (peek packets))
+        (recur (pop packets) (conj sent (:num (peek packets))) ackd))
+      
+      (= allpackets ackd)
+      (loge "done transmitting")
+
+      true
+      (do
+        (loge "recvd: ")
+        (loge (String. (:message @(s/take! (:socket @send-socket)))))))))
 
 
 (def recv-socket (atom nil))
@@ -52,28 +80,33 @@
                                                       :connection
                                                       :local-address) #"\:")))))
   
-  (loop []
-    (loge "receiving")
-    (def msg @(s/take! (:socket @recv-socket)))
-    
-    (when-not (:info @recv-socket)
-      (swap! recv-socket assoc :info {:port (.getPort (:sender msg))
-                                      :host (.getHostName (:sender msg))}))
-    
-    (def recvd (clojure.edn/read-string (String. (:message msg))))
-    (if (:done recvd)
+  (def numpackets (:packets (read-msg @recv-socket)))
+  (loge (str "num packets" numpackets))
+  
+  (loop [recvd-packets #{}]
+    (if (= numpackets (count (map :num recvd-packets)))
       (do
-        (loge "done")
-        (print (:data recvd))
+        (loge "done:")
+        (log recvd-packets)
+        (doseq [p (sort-by :num recvd-packets)]
+          (print (:data p)))
         (flush)
-        (send-msg @recv-socket {:ack "exit"})
-        (recur))
+        (Thread/sleep 1000))
+      
       (do
-        (loge "received")
-        (print (:data recvd))
-        (loge "acking")
-        (send-msg @recv-socket {:ack true})
-        (recur)))))
+        
+        (loge "receiving")
+        (def msg @(s/take! (:socket @recv-socket)))
+        
+        (when-not (:info @recv-socket)
+          (swap! recv-socket assoc :info {:port (.getPort (:sender msg))
+                                          :host (.getHostName (:sender msg))}))
+        
+        (def recvd (clojure.edn/read-string (String. (:message msg))))
+        
+        (do
+          (send-msg @recv-socket {:ack (:num recvd)})
+          (recur (conj recvd-packets recvd)))))))
 
 (defn -main [recvorsend & relationships]
   (case recvorsend
