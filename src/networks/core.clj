@@ -2,10 +2,7 @@
   (:require [aleph.udp :as udp]
             [manifold.stream :as s]
             [manifold.deferred :as d]
-            [clojure.data.json :as json]
-            [networks.table]
-            [clj-commons.byte-streams :refer [to-byte-arrays convert]]
-            [clojure.data.json :as json])
+            [clj-commons.byte-streams :refer [to-byte-arrays convert]])
   (:gen-class))
 
 ;; TODO, make last packet have a last:true flag
@@ -55,19 +52,26 @@
   (loop [packets packets
          sent #{}
          ackd #{}]
+    (def ack @(s/try-take! (:socket @send-socket) :default 10 :timeout))
+    
     (cond
-      (> 2 (- (count sent) (count ackd)))
+      (not= ack :timeout)
       (do
-        (send-msg @send-socket (peek packets))
-        (recur (pop packets) (conj sent (:num (peek packets))) ackd))
+        (let [ack (clojure.edn/read-string (String. (:message ack)))]
+          (loge (str "recvd: " ack))
+          (recur packets sent (conj ackd (:ack ack)))))
       
       (= allpackets ackd)
       (loge "done transmitting")
+      
+      (> 2 (- (count sent) (count ackd)))
+      (do
+        (loge "sending")
+        (send-msg @send-socket (peek packets))
+        (recur (pop packets) (conj sent (:num (peek packets))) ackd))
 
       true
-      (do
-        (loge "recvd: ")
-        (loge (String. (:message @(s/take! (:socket @send-socket)))))))))
+      (recur packets sent ackd))))
 
 
 (def recv-socket (atom nil))
@@ -87,15 +91,15 @@
     (if (= numpackets (count (map :num recvd-packets)))
       (do
         (loge "done:")
-        (log recvd-packets)
         (doseq [p (sort-by :num recvd-packets)]
           (print (:data p)))
         (flush)
-        (Thread/sleep 1000))
+        (while true
+          (loge "waiting for exit")
+          (Thread/sleep 1000)))
       
       (do
         
-        (loge "receiving")
         (def msg @(s/take! (:socket @recv-socket)))
         
         (when-not (:info @recv-socket)
@@ -103,6 +107,7 @@
                                           :host (.getHostName (:sender msg))}))
         
         (def recvd (clojure.edn/read-string (String. (:message msg))))
+        (loge ["received" (:num recvd)])
         
         (do
           (send-msg @recv-socket {:ack (:num recvd)})
