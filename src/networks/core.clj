@@ -8,6 +8,7 @@
             [clojure.data.json :as json])
   (:gen-class))
 
+;; TODO, make last packet have a last:true flag
 (def send-socket (atom nil))
 (comment
   (send3700 "127.0.0.1" "56655"))
@@ -31,14 +32,13 @@
                               :host recv_host}})
   
   (def inp (to-byte-arrays (slurp *in*) {:chunk-size 1375}))
-  (doseq [section inp]
+  (doseq [section (butlast inp)]
     (loge "sending a section")
     (send-msg @send-socket {:data (String. section)})
     (loge "waiting for ack")
     (loge (clojure.edn/read-string (String. (:message @(s/take! (:socket @send-socket)))))))
-  
-  (send-msg @send-socket {:done true})
-  (loge "done sent")
+  (send-msg @send-socket {:data (String. (last inp))
+                          :done true}) 
   (loge (String. (:message @(s/take! (:socket @send-socket))))))
 
 
@@ -64,7 +64,8 @@
     (if (:done recvd)
       (do
         (loge "done")
-        (println "")
+        (print (:data recvd))
+        (flush)
         (send-msg @recv-socket {:ack "exit"})
         (recur))
       (do
