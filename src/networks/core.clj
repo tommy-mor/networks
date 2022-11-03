@@ -68,36 +68,34 @@
   ;; (clojure.edn/read-string (String. (:message @(s/take! socket))))
   (:message (receive socket)))
 
-(def sent (atom #{}))
-(def ackd (atom #{}))
-
-(def packets (atom nil))
-
 (def ^:dynamic *window* 4)
 
-;; TODO problem: the {:packets 12} packet is duplicated... which is messing stuff up.
+
+(defn pending-packet [num->packet allpackets sent]
+  (num->packet (first (sort (clojure.set/difference allpackets sent)))))
 
 (defn send3700 [recv_host recv_port]
   (reset! send-socket {:socket (new DatagramSocket 0 (InetAddress/getByName recv_host))
                        :info {:port (Integer/parseInt recv_port)
                               :host recv_host}})
-  (def packets (reduce conj
-                       (clojure.lang.PersistentQueue/EMPTY)
-                       (map (fn [^"[B" a b] (assoc {}
-                                                   :data (String. a)
-                                                   :num b))
-                            (to-byte-arrays (slurp *in*) {:chunk-size 1375})
-                            (range))))
-  
-  (def allpackets (into #{} (map :num packets)))
+  (def packets (into 
+                {}
+                (map (fn [^"[B" a b] [b (assoc {}
+                                               :data (String. a)
+                                               :num b)])
+                     (to-byte-arrays (slurp *in*) {:chunk-size 1375})
+                     (range))))
+
+  (def allpackets (into #{} (keys packets)))
 
   (send-msg @send-socket {:packets (count allpackets)
                           :num -1})
+
   
   
-  (loop [packets packets
-         sent #{}
-         ackd #{}]
+  (loop [sent #{}
+         ackd #{}
+         packetnum->sendtime {}]
     
     (def ack (receive-timeout (:socket @send-socket) 10))
 
@@ -108,19 +106,41 @@
       (do
         (let [ack (:message ack)]
           (loge (str "recvd: " ack))
-          (recur packets sent (conj ackd (:ack ack)))))
+          (recur sent
+                 (conj ackd (:ack ack))
+                 (dissoc packetnum->sendtime (:ack ack)))))
       
       (= allpackets ackd)
       (loge "done transmitting")
       
-      (and (> *window* (- (count sent) (count ackd))) (peek packets))
-      (do
-        (loge ["sending" (:num (peek packets))])
-        (send-msg @send-socket (peek packets))
-        (recur (pop packets) (conj sent (:num (peek packets))) ackd))
+      (and (> *window* (- (count sent) (count ackd)))
+           (pending-packet packets allpackets sent))
+      (let [packet (pending-packet packets allpackets sent)
+            packetnum (:num packet)]
+        (loge ["sending" packetnum])
+        (send-msg @send-socket packet)
+        (recur (conj sent packetnum)
+               ackd
+               (assoc packetnum->sendtime packetnum (inst-ms (java.time.Instant/now)))))
 
       true
-      (recur packets sent ackd))))
+      (do
+        (let [now (inst-ms (java.time.Instant/now))
+              outstanding-packets
+              (->> packetnum->sendtime
+                   (filter
+                    (fn [[packetnum time]] (> (- now time) 1000)))
+                   (map first)
+                   set)
+              
+              sent'
+              (clojure.set/difference sent outstanding-packets)
+
+              packetnum->sendtime' (apply dissoc packetnum->sendtime outstanding-packets)]
+          (loge ["outstanding" outstanding-packets])
+          (recur sent'
+                 ackd
+                 packetnum->sendtime))))))
 
 
 (def recv-socket (atom nil))
