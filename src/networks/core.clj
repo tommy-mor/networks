@@ -162,16 +162,18 @@
   (loge (str "Bound to port " (.getLocalPort ^DatagramSocket (:socket @recv-socket))))
 
   (loop [numpackets -1
-         recvd-packets #{}]
-    (if (= numpackets (count (map :num recvd-packets)))
+         recvd-packets #{}
+         printed false]
+    (if (and (not printed)
+             (= numpackets (count (map :num recvd-packets))))
       (do
         (loge "done:")
         (doseq [p (sort-by :num recvd-packets)]
           (print (:data p)))
         (flush)
-        (while true
-          (loge "waiting for exit")
-          (Thread/sleep 1000)))
+        ;; this needs to still run, because if acks are dropped, we need to resend them so send
+        ;; can finish
+        (recur numpackets recvd-packets true))
       
       (do
         
@@ -181,7 +183,7 @@
           (do
             (loge (str "num packets " (:packets (:message msg))))
             (send-msg @recv-socket {:ack -1})
-            (recur (:packets (:message msg)) recvd-packets))
+            (recur (:packets (:message msg)) recvd-packets printed))
           (do
             
             
@@ -197,10 +199,10 @@
               :corrupted
               (do
                 (loge "received corrupted packet")
-                (recur numpackets recvd-packets))
+                (recur numpackets recvd-packets printed))
               (do
                 (send-msg @recv-socket {:ack (:num recvd)})
-                (recur numpackets (conj recvd-packets recvd))))))))))
+                (recur numpackets (conj recvd-packets recvd) printed)))))))))
 
 (defn -main [recvorsend & relationships]
   (case recvorsend
