@@ -1,18 +1,32 @@
 (ns networks.core
   (:require
-   [clj-commons.byte-streams :refer [to-byte-arrays convert]])
+   [clj-commons.byte-streams :refer [to-byte-arrays convert]]
+   [clojure.term.colors :refer [blue on-red]])
   (:import (java.net InetAddress DatagramPacket DatagramSocket))
   (:gen-class))
 
 (set! *warn-on-reflection* true)
+
+(defn now []
+  (inst-ms (java.time.Instant/now)))
+
+(def socket (atom nil))
 
 
 (defn loge [& e]
   (binding [*out* *err*]
     (apply println e)))
 
+(def lastcall (atom (now)))
+
+(defn loge-slow [& e]
+  (when (< 100 (- (now) @lastcall))
+    (apply loge e)
+    (reset! lastcall (now))))
+
 
 ;; https://github.com/babashka/babashka/blob/3dfc15f5a40efaec07cba991892c1207a352fab4/test-resources/babashka/statsd.clj
+(def ^:dynamic *window* 4)
 
 (defn make-socket
   [port] (new DatagramSocket ^int port))
@@ -52,7 +66,7 @@
            :corrupted)))}))
 
 (defn receive-timeout [^DatagramSocket socket timeout]
-  (.setSoTimeout socket 100)
+  (.setSoTimeout socket timeout)
   (try
     (receive socket)
     (catch java.net.SocketTimeoutException e
@@ -61,11 +75,6 @@
 
 
 
-
-;; TODO, make last packet have a last:true flag
-(def send-socket (atom nil))
-(comment
-  (send3700 "127.0.0.1" "56655"))
 
 (defn log [thing]
   (spit "log.edn"
@@ -80,14 +89,12 @@
   ;; (clojure.edn/read-string (String. (:message @(s/take! socket))))
   (:message (receive socket)))
 
-(def ^:dynamic *window* 4)
+(defn pending-packet [num->packet allpackets sent ackd]
+  (num->packet (first (sort (clojure.set/difference allpackets sent ackd)))))
 
-
-(defn pending-packet [num->packet allpackets sent]
-  (num->packet (first (sort (clojure.set/difference allpackets sent)))))
-
+;; TODO group acks together.
 (defn send3700 [recv_host recv_port]
-  (reset! send-socket {:socket (new DatagramSocket 0 (InetAddress/getByName recv_host))
+  (reset! socket {:socket (new DatagramSocket 0 (InetAddress/getByName recv_host))
                        :info {:port (Integer/parseInt recv_port)
                               :host recv_host}})
   (def packets (let [packets (into 
@@ -104,46 +111,54 @@
   (loop [sent #{}
          ackd #{}
          packetnum->sendtime {}
-         recentrtt (list)]
+         recentrtt (list)
+         window-size 1]
     
-    (def ack (receive-timeout (:socket @send-socket) 10))
+    (def ack (receive-timeout (:socket @socket) 1))
 
-    (comment (loge [sent ackd ack]))
+    (comment (loge [window-size recentrtt sent ackd #_packetnum->sendtime]))
     #_(loge [recentrtt])
     
     (cond
       (= (:message ack) :corrupted)
-      (recur sent ackd packetnum->sendtime recentrtt)
+      (recur sent ackd packetnum->sendtime recentrtt window-size)
       
       (not= ack :timeout)
       (do
         (let [ack (:message ack)]
+          (loge ["ack" (:ack ack)])
           (recur sent
+                 
                  (conj ackd (:ack ack))
-                 (dissoc packetnum->sendtime (:ack ack))
-                 (let [rtt (- (inst-ms (java.time.Instant/now)) (packetnum->sendtime (:ack ack)))]
+                 
+                 packetnum->sendtime
+                 
+                 (let [rtt (- (now) (packetnum->sendtime (:ack ack)))]
                    (case (count recentrtt)
                      4 (conj (butlast recentrtt) rtt)
-                     (conj recentrtt rtt))))))
+                     (conj recentrtt rtt)))
+                 
+                 (* 2 window-size))))
       
       (= allpackets ackd)
       (loge "done transmitting")
       
-      (and (> *window* (- (count sent) (count ackd)))
-           (pending-packet packets allpackets sent))
+      (and (> window-size (count (clojure.set/difference sent ackd)))
+           (pending-packet packets allpackets sent ackd))
       
-      (let [packet (pending-packet packets allpackets sent)
+      (let [packet (pending-packet packets allpackets sent ackd)
             packetnum (:num packet)]
-        #_(loge ["sending" packetnum])
-        (send-msg @send-socket packet)
+        (loge ["sending" packetnum])
+        (send-msg @socket packet)
         (recur (conj sent packetnum)
                ackd
-               (assoc packetnum->sendtime packetnum (inst-ms (java.time.Instant/now)))
-               recentrtt))
+               (assoc packetnum->sendtime packetnum (now))
+               recentrtt
+               window-size))
 
       true
       (do
-        (let [now (inst-ms (java.time.Instant/now))
+        (let [now (now)
               timeout (if (not-empty recentrtt)
                         (* 1 (/ (apply + recentrtt)
                                 (count recentrtt)))
@@ -155,25 +170,36 @@
                    (map first)
                    set)
               
+              outstanding-packets
+              (clojure.set/difference outstanding-packets ackd)
+              
               sent'
               (clojure.set/difference sent outstanding-packets)
 
-              packetnum->sendtime' (apply dissoc packetnum->sendtime outstanding-packets)]
+              outstanding-packets-unpunished
+              (clojure.set/intersection outstanding-packets sent)]
           
-          #_(loge ["outstanding" outstanding-packets])
-          (when (not-empty outstanding-packets)
-            (loge ["outstanding packets" (count outstanding-packets)]))
+          (comment (when (not-empty outstanding-packets)
+                     (loge [(on-red (blue "outstanding packets"))
+                            (count outstanding-packets)])))
+          (loge [(first recentrtt) "window size: " window-size])
           
           (recur sent'
                  ackd
                  packetnum->sendtime
-                 recentrtt))))))
+                 recentrtt
+                 (if (and (not-empty outstanding-packets-unpunished)
+                          (> window-size 1)) 
+                   (do
+                     (loge ["cutting window size" (count outstanding-packets-unpunished)])
+                     (max 1 (/ window-size (int
+                                            (Math/pow 2 (count outstanding-packets-unpunished))))))
+                   window-size)))))))
 
 
-(def recv-socket (atom nil))
 (defn recv3700 []
-  (reset! recv-socket {:socket (new DatagramSocket)})
-  (loge (str "Bound to port " (.getLocalPort ^DatagramSocket (:socket @recv-socket))))
+  (reset! socket {:socket (new DatagramSocket)})
+  (loge (str "Bound to port " (.getLocalPort ^DatagramSocket (:socket @socket))))
 
   (loop [numpackets -1
          recvd-packets #{}
@@ -191,20 +217,20 @@
       
       (do
         
-        (def msg (receive (:socket @recv-socket)))
+        (def msg (receive (:socket @socket)))
         
-        (when-not (:info @recv-socket)
-          (swap! recv-socket assoc :info (select-keys msg [:host :port])))
+        (when-not (:info @socket)
+          (swap! socket assoc :info (select-keys msg [:host :port])))
         
         (def recvd (:message msg))
 
         #_(log [recvd msg])
-        #_(loge ["received" (:num recvd)])
+        (loge ["received" (:num recvd)])
         
         (if (= (:num recvd) -1)
           (do
             (loge (str "num packets " (:packets recvd)))
-            (send-msg @recv-socket {:ack -1})
+            (send-msg @socket {:ack -1})
             (recur (:packets recvd) recvd-packets printed))
           (do
             
@@ -215,7 +241,9 @@
                 (loge "received corrupted packet")
                 (recur numpackets recvd-packets printed))
               (do
-                (send-msg @recv-socket {:ack (:num recvd)})
+                
+                (loge ["sending ack" (:num recvd)])
+                (send-msg @socket {:ack (:num recvd)})
                 (recur numpackets (conj recvd-packets recvd) printed)))))))))
 
 (defn -main [recvorsend & relationships]

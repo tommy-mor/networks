@@ -7,7 +7,8 @@
                  [org.clojure/data.json "2.4.0"]
                  [org.clj-commons/gloss "0.3.0"]
                  [org.clojure/tools.cli "1.0.206"]
-                 [org.clojure/core.match "1.0.0"] ]
+                 [org.clojure/core.match "1.0.0"]
+                 [clojure-term-colors "0.1.0"]]
   
   :repl-options {:init-ns networks.core}
 
