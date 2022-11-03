@@ -86,8 +86,6 @@
 (defn pending-packet [num->packet allpackets sent]
   (num->packet (first (sort (clojure.set/difference allpackets sent)))))
 
-;; TODO need to fix ack resending for numpackets packet, put that in list..
-;; TODO need to stop nil from getting in sent
 (defn send3700 [recv_host recv_port]
   (reset! send-socket {:socket (new DatagramSocket 0 (InetAddress/getByName recv_host))
                        :info {:port (Integer/parseInt recv_port)
@@ -105,44 +103,55 @@
 
   (loop [sent #{}
          ackd #{}
-         packetnum->sendtime {}]
+         packetnum->sendtime {}
+         recentrtt (list)]
     
     (def ack (receive-timeout (:socket @send-socket) 10))
 
-    (loge [sent ackd ack])
+    (comment (loge [sent ackd ack]))
+    #_(loge [recentrtt])
     
     (cond
       (= (:message ack) :corrupted)
-      (recur sent ackd packetnum->sendtime)
+      (recur sent ackd packetnum->sendtime recentrtt)
       
       (not= ack :timeout)
       (do
         (let [ack (:message ack)]
-          (loge (str "recvd: " ack))
           (recur sent
                  (conj ackd (:ack ack))
-                 (dissoc packetnum->sendtime (:ack ack)))))
+                 (dissoc packetnum->sendtime (:ack ack))
+                 (let [rtt (- (inst-ms (java.time.Instant/now)) (packetnum->sendtime (:ack ack)))]
+                   (case (count recentrtt)
+                     4 (conj (butlast recentrtt) rtt)
+                     (conj recentrtt rtt))))))
       
       (= allpackets ackd)
       (loge "done transmitting")
       
       (and (> *window* (- (count sent) (count ackd)))
            (pending-packet packets allpackets sent))
+      
       (let [packet (pending-packet packets allpackets sent)
             packetnum (:num packet)]
-        (loge ["sending" packetnum])
+        #_(loge ["sending" packetnum])
         (send-msg @send-socket packet)
         (recur (conj sent packetnum)
                ackd
-               (assoc packetnum->sendtime packetnum (inst-ms (java.time.Instant/now)))))
+               (assoc packetnum->sendtime packetnum (inst-ms (java.time.Instant/now)))
+               recentrtt))
 
       true
       (do
         (let [now (inst-ms (java.time.Instant/now))
+              timeout (if (not-empty recentrtt)
+                        (* 1 (/ (apply + recentrtt)
+                                (count recentrtt)))
+                        1000)
               outstanding-packets
               (->> packetnum->sendtime
                    (filter
-                    (fn [[packetnum time]] (> (- now time) 1000)))
+                    (fn [[packetnum time]] (> (- now time) timeout)))
                    (map first)
                    set)
               
@@ -150,10 +159,15 @@
               (clojure.set/difference sent outstanding-packets)
 
               packetnum->sendtime' (apply dissoc packetnum->sendtime outstanding-packets)]
-          (loge ["outstanding" outstanding-packets])
+          
+          #_(loge ["outstanding" outstanding-packets])
+          (when (not-empty outstanding-packets)
+            (loge ["outstanding packets" (count outstanding-packets)]))
+          
           (recur sent'
                  ackd
-                 packetnum->sendtime))))))
+                 packetnum->sendtime
+                 recentrtt))))))
 
 
 (def recv-socket (atom nil))
@@ -179,22 +193,22 @@
         
         (def msg (receive (:socket @recv-socket)))
         
-        (if (= (:num (:message msg)) -1)
+        (when-not (:info @recv-socket)
+          (swap! recv-socket assoc :info (select-keys msg [:host :port])))
+        
+        (def recvd (:message msg))
+
+        #_(log [recvd msg])
+        #_(loge ["received" (:num recvd)])
+        
+        (if (= (:num recvd) -1)
           (do
-            (loge (str "num packets " (:packets (:message msg))))
+            (loge (str "num packets " (:packets recvd)))
             (send-msg @recv-socket {:ack -1})
-            (recur (:packets (:message msg)) recvd-packets printed))
+            (recur (:packets recvd) recvd-packets printed))
           (do
             
             
-            (when-not (:info @recv-socket)
-              (swap! recv-socket assoc :info (select-keys msg [:host :port])))
-            
-            (def recvd (:message msg))
-
-            (log [recvd msg])
-            (loge ["received" (:num recvd)])
-
             (case recvd
               :corrupted
               (do
