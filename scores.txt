@@ -1,0 +1,2 @@
+4-2 16.9 seconds with decreasing window by one, send ack if ever out of order
+4-2 15.4 seconds with decreasing window by one, send ack if ever out of order
