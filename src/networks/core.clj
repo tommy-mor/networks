@@ -73,6 +73,8 @@
 
 (def packets (atom nil))
 
+(def ^:dynamic *window* 4)
+
 ;; TODO problem: the {:packets 12} packet is duplicated... which is messing stuff up.
 
 (defn send3700 [recv_host recv_port]
@@ -111,7 +113,7 @@
       (= allpackets ackd)
       (loge "done transmitting")
       
-      (and (> 2 (- (count sent) (count ackd))) (peek packets))
+      (and (> *window* (- (count sent) (count ackd))) (peek packets))
       (do
         (loge ["sending" (:num (peek packets))])
         (send-msg @send-socket (peek packets))
