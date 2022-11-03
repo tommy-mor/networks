@@ -73,7 +73,7 @@
 
 (def packets (atom nil))
 
-(type (first (to-byte-arrays "artsarstarstarts" {:chunk-size 10})))
+;; TODO problem: the {:packets 12} packet is duplicated... which is messing stuff up.
 
 (defn send3700 [recv_host recv_port]
   (reset! send-socket {:socket (new DatagramSocket 0 (InetAddress/getByName recv_host))
@@ -89,7 +89,8 @@
   
   (def allpackets (into #{} (map :num packets)))
 
-  (send-msg @send-socket {:packets (count allpackets)})
+  (send-msg @send-socket {:packets (count allpackets)
+                          :num -1})
   
   
   (loop [packets packets
@@ -110,9 +111,9 @@
       (= allpackets ackd)
       (loge "done transmitting")
       
-      (> 2 (- (count sent) (count ackd)))
+      (and (> 2 (- (count sent) (count ackd))) (peek packets))
       (do
-        (loge "sending")
+        (loge ["sending" (:num (peek packets))])
         (send-msg @send-socket (peek packets))
         (recur (pop packets) (conj sent (:num (peek packets))) ackd))
 
@@ -142,16 +143,24 @@
       (do
         
         (def msg (receive (:socket @recv-socket)))
-        
-        (when-not (:info @recv-socket)
-          (swap! recv-socket assoc :info (select-keys msg [:host :port])))
-        
-        (def recvd (:message msg))
-        (loge ["received" (:num recvd)])
-        
-        (do
-          (send-msg @recv-socket {:ack (:num recvd)})
-          (recur (conj recvd-packets recvd)))))))
+
+        ;; skip the first package if it is a dup
+        (if (= (:num (:message msg)) -1)
+          (recur recvd-packets)
+          (do
+            
+            
+            (when-not (:info @recv-socket)
+              (swap! recv-socket assoc :info (select-keys msg [:host :port])))
+            
+            (def recvd (:message msg))
+
+            (log recvd)
+            (loge ["received" (:num recvd)])
+            
+            (do
+              (send-msg @recv-socket {:ack (:num recvd)})
+              (recur (conj recvd-packets recvd)))))))))
 
 (defn -main [recvorsend & relationships]
   (case recvorsend
