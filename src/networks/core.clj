@@ -91,8 +91,15 @@
 (defn pending-packet [num->packet allpackets sent ackd]
   (num->packet (first (sort (clojure.set/difference allpackets sent ackd)))))
 
-;; TODO group acks together, have have send but unknown constantly transmitted
-;; in every batch
+(defn set-covers [acks] (into #{} (range (apply min acks) (inc (apply max acks)))))
+
+(defn average [coll default]
+  (if (not-empty coll)
+    (/ (apply + coll)
+       (count coll))
+    default))
+
+;; any packet that is is not ackd, but is less than latest ackd one is lost, resubmit
 (defn send3700 [recv_host recv_port]
   (reset! socket {:socket (new DatagramSocket 0 (InetAddress/getByName recv_host))
                        :info {:port (Integer/parseInt recv_port)
@@ -111,63 +118,80 @@
 
   (loop [sent #{}
          ackd #{}
+         missing #{}
          packetnum->sendtime {}
          recentrtt (list)
          window-size 2]
     
-    (def ack (receive-timeout (:socket @socket) 100))
+    (def ack (receive-timeout (:socket @socket) 10))
 
-    (loge [window-size recentrtt sent ackd #_packetnum->sendtime])
+    (loge [window-size sent ackd missing #_packetnum->sendtime])
     
     (cond
       (= (:message ack) :corrupted)
-      (recur sent ackd packetnum->sendtime recentrtt window-size)
+      (recur sent ackd missing packetnum->sendtime recentrtt window-size)
       
       (not= ack :timeout)
       (do
-        (let [acks (:message ack)]
-          (loge ["ack" (:ack acks)])
-          (recur (do
-                   (loge ["merging sent and" acks])
-                   (clojure.set/union sent (set (:ack acks))))
+        (let [acks (:message ack)
+              ackset (set (:ack acks))]
+          (loge ["ack" ackset])
+          (recur sent
                  
-                 (reduce conj ackd (:ack acks))
+                 (reduce conj ackd ackset)
+                 
+                 (if (set? missing) (clojure.set/difference missing ackset) #{}) ;; TOOD make this automatically add things that are earlier than maxack
                  
                  packetnum->sendtime
                  
-                 (let [rtts (doall (for [ack (:ack acks)]
-                                    (- (now) (packetnum->sendtime ack))))]
+                 (let [rtts (doall (for [ack ackset]
+                                     (- (now) (packetnum->sendtime ack))))]
                    (take 4 (concat recentrtt rtts)))
                  
                  (do
-                   (loge ["doubling window size to" (* 2 window-size)])
-                   (* 2 window-size)))))
+                   (let [new-acks (clojure.set/difference ackset ackd)]
+                     (loge ["giving window" new-acks "more"])
+                     (+  (* 2 (count new-acks)) window-size))))))
       
       (= allpackets ackd)
       (loge "done transmitting")
       
       (and (> window-size (count (clojure.set/difference sent ackd)))
            (pending-packet packets allpackets sent ackd))
-      
       (let [packet (pending-packet packets allpackets sent ackd)
             packetnum (:num packet)]
         
         (loge ["sending" packetnum])
         
-        (send-msg (assoc packet :window-size window-size))
+        (send-msg (assoc packet
+                         :window-size window-size
+                         :plsack missing))
         (recur (conj sent packetnum)
                ackd
+               missing
                (assoc packetnum->sendtime packetnum (now))
+               recentrtt
+               window-size))
+
+      (and (set? missing) (not-empty missing))
+      (do
+        (loge ["sending plscak" missing])
+        (send-msg {:window-size window-size
+                   :plsack missing})
+        (send-msg {:window-size window-size
+                   :plsack missing})
+        (recur sent
+               ackd
+               :done
+               packetnum->sendtime
                recentrtt
                window-size))
 
       true
       (do
         (let [now (now)
-              timeout (if (not-empty recentrtt)
-                        (* 2 (/ (apply + recentrtt)
-                                (count recentrtt)))
-                        2000)
+              timeout (* 2 (average recentrtt 2000))
+              
               outstanding-packets
               (->> packetnum->sendtime
                    (filter
@@ -178,9 +202,6 @@
               outstanding-packets
               (clojure.set/difference outstanding-packets ackd)
               
-              sent'
-              (clojure.set/difference sent outstanding-packets)
-
               outstanding-packets-unpunished
               (clojure.set/intersection outstanding-packets sent)]
           
@@ -189,8 +210,9 @@
                    outstanding-packets]))
           #_(loge-slow [(first recentrtt) "window size: " window-size])
           
-          (recur sent'
+          (recur sent
                  ackd
+                 (if (set? missing) (clojure.set/union missing outstanding-packets) missing)
                  packetnum->sendtime
                  recentrtt
                  (if (and (not-empty outstanding-packets-unpunished)
@@ -209,6 +231,10 @@
   (reset! socket {:socket (new DatagramSocket)})
   (loge (str "Bound to port " (.getLocalPort ^DatagramSocket (:socket @socket))))
   (def total-packets (atom -1))
+
+  (def last-msg-time (atom (now)))
+  (def times (atom []))
+  
 
   ;; IDEA, count time. allow 80% of ack if its been a while
   
@@ -237,44 +263,72 @@
            (or
             (>= (count pending-acks) window-size)
             
-            (not= (count pending-acks)
+            #_(not= (count pending-acks)
                   (inc (- (apply max pending-acks)
                           (apply min pending-acks))))))
       (do
         (loge ["sending ack for" pending-acks])
         (send-msg {:ack (sort pending-acks)})
         (recur recvd-packets printed #{} window-size))
+
+      (> (- (now) @last-msg-time)
+         (* 3 (average @times 1000)))
+
+      (do
+        (loge "sending acks cause we timed out")
+        (reset! last-msg-time (now))
+        (send-msg {:ack (keys recvd-packets)})
+        (recur recvd-packets true #{} window-size))
+      
+      
       
       true
       (do
         
-        (def msg (receive (:socket @socket)))
-        
-        (when-not (:info @socket)
-          (swap! socket assoc :info (select-keys msg [:host :port])))
-        
-        (def recvd (:message msg))
+        (def msg (receive-timeout (:socket @socket) 10))
 
-        #_(log [recvd msg])
-        (loge ["received" (:num recvd) :window-size (:window-size recvd)])
-        (when (= (:num recvd) -1)
-          (loge (str "num packets " (:packets recvd)))
-          (reset! total-packets (:packets recvd)))
-        
-        (case recvd
-          :corrupted
-          (do
-            (loge "received corrupted packet")
-            (recur recvd-packets printed pending-acks window-size))
+        (if (= msg :timeout)
+          (recur recvd-packets printed pending-acks window-size)
           (do
             
-            (loge ["received packet" (:num recvd)])
-            (recur (case (int (:num recvd))
-                     -1 recvd-packets
-                     (assoc recvd-packets (:num recvd) recvd))
-                   printed
-                   (conj pending-acks (:num recvd))
-                   (:window-size recvd))))))))
+            (reset! times (take 4 (conj @times (- (now) @last-msg-time) )))
+            (reset! last-msg-time (now))
+
+            (when-not (:info @socket)
+              (swap! socket assoc :info (select-keys msg [:host :port])))
+            
+            (def recvd (:message msg))
+
+            #_(log [recvd msg])
+            (loge ["received" (:num recvd) :window-size (:window-size recvd) :plsack (:plsack recvd)])
+            (when (= (:num recvd) -1)
+              (loge (str "num packets " (:packets recvd)))
+              (reset! total-packets (:packets recvd)))
+            
+            (case recvd
+              :corrupted
+              (do
+                (loge "received corrupted packet")
+                (recur recvd-packets printed pending-acks (dec window-size)))
+              (do
+                
+                (loge ["received packet" (:num recvd)])
+                (when (not-empty (:plsack recvd))
+                  (send-msg {:ack (sort (clojure.set/union
+                                         pending-acks
+                                         (:plsack recvd)
+                                         (set-covers #{(apply min (:plsack recvd))
+                                                       (apply max (keys recvd-packets))})))}))
+                
+                (recur (case (:num recvd)
+                         -1 recvd-packets
+                         nil recvd-packets
+                         (assoc recvd-packets (:num recvd) recvd))
+                       printed
+                       (if (:num recvd)
+                         (conj pending-acks (:num recvd))
+                         pending-acks)
+                       (:window-size recvd))))))))))
 
 (defn -main [recvorsend & relationships]
   (case recvorsend
