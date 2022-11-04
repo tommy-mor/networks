@@ -11,3 +11,5 @@ I was not able to save the code before the deadline to salvage myself.
 But the assignment was fun, really enjoyed the emulator making it easy, and balancing different tradeoffs trying to design a new protocol.
 
 The hardest part (with my QUIC-like scheme was getting the window right..)
+
+Also, getting graalvm to compile my program was a bit of a headache but not too bad
