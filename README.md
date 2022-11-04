@@ -1,17 +1,13 @@
 all of the code is in src/networks/core.clj
 
 problem i faced:
-  some commands returned two responses.
-    that was tricky to handle, because i was getting the second response of the first command when I wanted the first response of the second command. I got around this by polling in a loop (core.clj:22)
+halfway through implementing, I realized I was doing it wrong.
+I was keeping track of timers for each packet individually, and, keeping the whole file in memory.
+Then I realized that that was potentially an advantage, so I started researching other formats besides TCP. I spent a lot of time read QUIC RFCs.
 
-  another problem i faced was that it would sometimes not take the entire stream when I asked it to.
-  I don't know how to figure this out.
+But that was too complicated, and I spent ~10 hours working on code that I did not end up using at all.
+I was not able to save the code before the deadline to salvage myself.
 
+But the assignment was fun, really enjoyed the emulator making it easy, and balancing different tradeoffs trying to design a new protocol.
 
-other than that was pretty straightforward.
-
-I tested by running commands in the clojure repl and seeing what they did.
-then I made some scripts to test the moving logic and cli arg parsing.
-then I uploaded to gradescope.
-
-for parsing the url, i just used java.net.URI. java is epic
+The hardest part (with my QUIC-like scheme was getting the window right..)

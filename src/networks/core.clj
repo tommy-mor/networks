@@ -25,9 +25,6 @@
     (reset! lastcall (now))))
 
 
-;; https://github.com/babashka/babashka/blob/3dfc15f5a40efaec07cba991892c1207a352fab4/test-resources/babashka/statsd.clj
-(def ^:dynamic *window* 4)
-
 (defn make-socket
   [port] (new DatagramSocket ^int port))
 
