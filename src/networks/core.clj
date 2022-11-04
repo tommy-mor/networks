@@ -189,7 +189,7 @@
                           (> window-size 1)) 
                    (do
                      (loge ["cutting window size" (count outstanding-packets-unpunished)])
-                     (max 1 (/ window-size (int
+                     (max 1 (/ window-size (bigint
                                             (Math/pow 2 (count outstanding-packets-unpunished))))))
                    window-size)))))))
 
