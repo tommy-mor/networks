@@ -7,7 +7,7 @@
            (java.io PrintWriter InputStreamReader BufferedReader))
   (:gen-class))
 
-(set! *warn-on-reflection* true)
+(set! *warn-on-reflection* false)
 
 (defn now []
   (inst-ms (java.time.Instant/now)))
@@ -29,18 +29,27 @@
   (prn "Connecting to" opts)
   (let [factory (SSLSocketFactory/getDefault)
         s (.createSocket factory ^String server ^int port)]
-    (prn s "connected")
+    (prn "connected")
+    (.startHandshake ^SSLSocket s)
+    (prn "handshake done")
     (reset! socket {:socket s
                     :in (BufferedReader. (InputStreamReader. (.getInputStream s)))
                     :out (PrintWriter. (.getOutputStream s))})))
 
-
+(defn http-request [requeststr]
+  (when-not @socket (connect))
+  
+  (let [{:keys [in out]} @socket]
+    (doto out
+      (.println requeststr)
+      (.println "")
+      (.flush))
+    (prn (slurp in))))
 
 
 (defn crawl [{:keys [arguments] {:keys [port server] :as opts} :options}]
   (let [[username password] (filter (complement empty?) arguments)]
-    (connect opts)))
-
+    ))
 
 (def cli-options
   [["-p" "--port PORT" "port number"
