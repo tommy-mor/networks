@@ -21,35 +21,60 @@
     (apply println e)))
 
 (defn root-page [{:keys [port server]}]
-  (str "https://" server ":" port "/"))
+  (str "https://" server ":" port "/fakebook/"))
+
+(defn login-page [{:keys [port server]}]
+  (str "https://" server ":" port "/accounts/login/?next=/fakebook/"))
 
 (def socket (atom nil))
 
 (defn connect [{:keys [port server] :as opts}]
-  (prn "Connecting to" opts)
-  (let [factory (SSLSocketFactory/getDefault)
-        s (.createSocket factory ^String server ^int port)]
-    (prn "connected")
-    (.startHandshake ^SSLSocket s)
-    (prn "handshake done")
-    (reset! socket {:socket s
-                    :in (BufferedReader. (InputStreamReader. (.getInputStream s)))
-                    :out (PrintWriter. (.getOutputStream s))})))
+  (when-not @socket
+    (let [factory (SSLSocketFactory/getDefault)
+          s (.createSocket factory ^String server ^int port)]
+      (println "new socket")
+      (.startHandshake ^SSLSocket s)
+      (println "handshake")
+      (reset! socket {:socket s
+                      :in (BufferedReader. (InputStreamReader. (.getInputStream s)))
+                      :out (PrintWriter. (.getOutputStream s))}))))
 
-(defn http-request [requeststr]
-  (when-not @socket (connect))
-  
-  (let [{:keys [in out]} @socket]
-    (doto out
-      (.println requeststr)
-      (.println "")
-      (.flush))
-    (prn (slurp in))))
+(defn REQ [opts {:keys [method url headers body]}]
+  (connect opts)
+  (try
+    (let [{:keys [socket in out]} @socket
+          {:keys [port server]} opts
+          start (now)]
+      (println (blue (str method url)))
+      (.println out (str method " " url " HTTP/1.1"))
+      (.println out (str "Host: " server))
+      (.println out "Connection: close")
+      (.println out "")
+      (.flush out)
+
+      (let [status (-> in .readLine)
+            headers (->> (repeatedly #(-> in .readLine))
+                         (take-while #(not (empty? %)))
+                         (map #(clojure.string/split % #": *" 2))
+                         (into {}))
+            body (slurp in)]
+        {:status status
+         :headers headers
+         :body body
+         :time (- (now) start)}))
+    
+    (finally
+      (when @socket
+        (.close (:socket @socket))
+        (reset! socket nil)))))
 
 
 (defn crawl [{:keys [arguments] {:keys [port server] :as opts} :options}]
   (let [[username password] (filter (complement empty?) arguments)]
-    ))
+    (prn (REQ opts {:method "GET"
+                    :url (login-page opts)
+                    :headers {"Host" server
+                              "Connection" "close"}}))))
 
 (def cli-options
   [["-p" "--port PORT" "port number"
@@ -63,7 +88,7 @@
 
 (defn main-default []
   (crawl {:options {:port 443, :server "proj5.3700.network"}
-          :arguments ["morriss.t" "001485200" "" "" "" "" "" ""]}))
+           :arguments ["morriss.t" "001485200" "" "" "" "" "" ""]}))
 
 (comment
   (main-default))
