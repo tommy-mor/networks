@@ -15,7 +15,7 @@
 (defn log [thing]
   (spit "log.edn"
         (str (pr-str thing)
-             "\n\n") :append true))
+             "\n\n") :append false))
 (defn loge [& e]
   (binding [*out* *err*]
     (apply println e)))
@@ -39,6 +39,15 @@
                       :in (BufferedReader. (InputStreamReader. (.getInputStream s)))
                       :out (PrintWriter. (.getOutputStream s))}))))
 
+(def cookies (atom {}))
+
+(defn read-cookies [headers]
+  (swap! cookies merge (->> (get headers "Set-Cookie")
+                            (map #(clojure.string/split % #"[=;] *" 3))
+                            (map #(take 2 %))
+                            (map vec)
+                            (into {}))))
+
 (defn REQ [opts {:keys [method url headers body]}]
   (connect opts)
   (try
@@ -49,6 +58,12 @@
       (.println out (str method " " url " HTTP/1.1"))
       (.println out (str "Host: " server))
       (.println out "Connection: close")
+      
+      (.print out "Cookie: ")
+      (doseq [[k v] @cookies]
+        (.print out (str k "=" v "; ")))
+      (.println out "")
+      
       (.println out "")
       (.flush out)
 
@@ -56,8 +71,11 @@
             headers (->> (repeatedly #(-> in .readLine))
                          (take-while #(not (empty? %)))
                          (map #(clojure.string/split % #": *" 2))
-                         (into {}))
+                         (group-by first)
+                         (map (fn [[k v]] [k (map second v)]))
+                         (into {})) 
             body (slurp in)]
+        (read-cookies headers)
         {:status status
          :headers headers
          :body body
@@ -71,10 +89,12 @@
 
 (defn crawl [{:keys [arguments] {:keys [port server] :as opts} :options}]
   (let [[username password] (filter (complement empty?) arguments)]
-    (prn (REQ opts {:method "GET"
+    (log (REQ opts {:method "GET"
                     :url (login-page opts)
                     :headers {"Host" server
                               "Connection" "close"}}))))
+
+(comment (def req (read-string (slurp "log.edn"))))
 
 (def cli-options
   [["-p" "--port PORT" "port number"
