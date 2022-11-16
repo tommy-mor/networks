@@ -17,14 +17,14 @@
   (inst-ms (java.time.Instant/now)))
 
 (defn log [thing]
-  (spit "log.edn"
-        (str (pr-str thing)
-             "\n\n") :append true))
+  (comment (spit "log.edn"
+                 (str (pr-str thing)
+                      "\n\n") :append true)))
 
 (defn log-body [body]
-  (spit "body.txt"
-        (str body
-             "\n\n") :append true))
+  (comment (spit "body.txt"
+                 (str body
+                      "\n\n") :append true)))
 
 (defn loge [& e]
   (binding [*out* *err*]
@@ -40,7 +40,7 @@
   (let [factory (SSLSocketFactory/getDefault)
         s (.createSocket factory ^String server ^int port)]
     (.startHandshake ^SSLSocket s)
-    (println "completed handshake")
+    #_(println "completed handshake")
     {:socket s
      :in (.getInputStream s)
      :stringreader ()
@@ -65,7 +65,7 @@
   (let [{:keys [socket in out]} socket
         {:keys [port server]} opts
         start (now)]
-    (println (blue (str method " " url)))
+    #_(println (blue (str method " " url)))
     (.println out (str method " " url " HTTP/1.1"))
     (.println out (str "Host: " server))
     (.println out "Connection: Keep-Alive")
@@ -85,7 +85,6 @@
     (.println out "")
 
     (when (not-empty body)
-      (println "body:" body)
       (.println out body))
     
     (.println out "")
@@ -136,12 +135,12 @@
     (cond
       (clojure.string/includes? (:status resp) "302")
       (let [location (first (get-in resp [:headers "Location"]))]
-        (println (blue "302") location)
+        (comment (println (blue "302") location))
         (REQ socket opts {:method "GET"
                           :url location}))
       
       (clojure.string/includes? (:status resp) "403")
-      (println (on-red "403 forbidden" (:url resp)))
+      (comment (println (on-red "403 forbidden" (:url resp))))
       
       (clojure.string/includes? (:status resp) "503")
       (REQ-follow socket opts args)
@@ -151,7 +150,7 @@
       resp
       
       (clojure.string/includes? (:status resp) "404")
-      (println (on-red "404 not found" (:url resp)))
+      (comment (println (on-red "404 not found" (:url resp))))
 
       true
       (throw (ex-info "unknown status" {:resp resp})))))
@@ -184,14 +183,14 @@
                      (filter #(not (contains? @horizon %))))]
       (swap! horizon clojure.set/union (set links))
       (when flag
-        (println (blue "OMG FOUND FLAG" flag))
+        (println flag)
         (swap! flags conj flag))
       (log-body (:body resp))
       {:url url
        :links links
        :resp resp})
     (catch Exception e
-      (println (on-red "ERROR" url))
+      #_(println (on-red "ERROR" url))
       (log {:url url
             :error (.getMessage e)}))
     (finally
@@ -221,7 +220,7 @@
       
       (async/>!! free-connections socket)
 
-      (dotimes [i 3]
+      (dotimes [i 4]
         (async/>!! free-connections (connect opts)))
       
       (while (not (empty? (clojure.set/difference @horizon @visited)))
@@ -245,9 +244,10 @@
   (crawl (parse-opts args cli-options)))
 
 (defn main-default []
-  (println "starting!!")
+  #_(println "starting!!")
   (crawl {:options {:port 443, :server "proj5.3700.network"}
           :arguments ["morriss.t" "001485200" "" "" "" "" "" ""]}))
+true
 
 (comment
   (main-default))
