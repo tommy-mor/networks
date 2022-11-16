@@ -47,6 +47,12 @@
                             (map vec)
                             (into {}))))
 
+(defn char-seq 
+  [^java.io.Reader rdr]
+  (let [chr (.read rdr)]
+    (if (>= chr 0)
+      (cons chr (lazy-seq (char-seq rdr))))))
+
 (defn REQ [opts {:keys [method url headers body]}]
   (connect opts)
   (try
@@ -56,7 +62,7 @@
       (println (blue (str method " " url)))
       (.println out (str method " " url " HTTP/1.1"))
       (.println out (str "Host: " server))
-      (.println out "Connection: close")
+      (.println out "Connection: Keep-Alive")
       (when (not-empty body)
         (.println out (str "Content-Length: " (count body))))
       
@@ -84,8 +90,14 @@
                          (map #(clojure.string/split % #": *" 2))
                          (group-by first)
                          (map (fn [[k v]] [k (map second v)]))
-                         (into {})) 
-            body (slurp in)]
+                         (into {}))
+
+            content-length (Integer/parseInt (first (get headers "Content-Length" "0")))
+
+            body (->> (char-seq in)
+                      (take content-length)
+                      (map char)
+                      clojure.string/join)]
         (read-cookies headers)
         {:url url
          :status status
@@ -158,9 +170,7 @@
       (when flag
         (println (blue "OMG FOUND FLAG" flag))
         (swap! flags conj flag))
-      (log {:url url
-            :links links
-            :resp resp})
+      (log {:url url})
       {:url url
        :links links
        :resp resp})
@@ -195,6 +205,7 @@
   (crawl (parse-opts args cli-options)))
 
 (defn main-default []
+  (println "starting!!")
   (crawl {:options {:port 443, :server "proj5.3700.network"}
           :arguments ["morriss.t" "001485200" "" "" "" "" "" ""]}))
 
