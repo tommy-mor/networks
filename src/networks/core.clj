@@ -24,7 +24,7 @@
   (str "https://" server ":" port "/fakebook/"))
 
 (defn login-page [{:keys [port server]}]
-  (str "https://" server ":" port "/accounts/login/?next=/fakebook/"))
+  (str "https://" server ":" port "/accounts/login/"))
 
 (def socket (atom nil))
 
@@ -54,17 +54,31 @@
     (let [{:keys [socket in out]} @socket
           {:keys [port server]} opts
           start (now)]
-      (println (blue (str method url)))
+      (println (blue (str method " " url)))
       (.println out (str method " " url " HTTP/1.1"))
       (.println out (str "Host: " server))
       (.println out "Connection: close")
+      (when (not-empty body)
+        (.println out (str "Content-Length: " (count body))))
       
-      (.print out "Cookie: ")
-      (doseq [[k v] @cookies]
-        (.print out (str k "=" v "; ")))
+      (when headers
+        (doseq [[k v] headers]
+          (.println out (str k ": " v))))
+      
+      (.println out (str "cookie: "
+                         (let [cookies (clojure.string/join "; "
+                                                            (map #(clojure.string/join "=" %)
+                                                                 @cookies))]
+                           (println (on-red cookies))
+                           cookies)))
+      (.println out "")
+
+      (when (not-empty body)
+        (println "body:" body)
+        (.println out body))
+      
       (.println out "")
       
-      (.println out "")
       (.flush out)
 
       (let [status (-> in .readLine)
@@ -75,6 +89,7 @@
                          (map (fn [[k v]] [k (map second v)]))
                          (into {})) 
             body (slurp in)]
+        (log headers)
         (read-cookies headers)
         {:status status
          :headers headers
@@ -87,14 +102,24 @@
         (reset! socket nil)))))
 
 
+(defn extract-csrf [body]
+  (->> (re-seq #"name=\"csrfmiddlewaretoken\" value=\"([^\"]+)\"" body)
+       (map second)
+       first))
+
 (defn crawl [{:keys [arguments] {:keys [port server] :as opts} :options}]
   (let [[username password] (filter (complement empty?) arguments)]
-    (log (REQ opts {:method "GET"
-                    :url (login-page opts)
-                    :headers {"Host" server
-                              "Connection" "close"}}))))
+    (let [csrf-token (extract-csrf (:body (REQ opts {:method "GET"
+                                                     :url (login-page opts)})))]
+      (println "csrf-token" csrf-token)
+      (println (REQ opts {:method "POST"
+                          :url (login-page opts)
+                          :headers {"Content-Type" "application/x-www-form-urlencoded"}
+                          :body (str "username=" username
+                                     "&password=" password
+                                     "&csrfmiddlewaretoken=" csrf-token)})))))
 
-(comment (def req (read-string (slurp "log.edn"))))
+(def req (read-string (slurp "log.edn"))) 
 
 (def cli-options
   [["-p" "--port PORT" "port number"
@@ -108,7 +133,7 @@
 
 (defn main-default []
   (crawl {:options {:port 443, :server "proj5.3700.network"}
-           :arguments ["morriss.t" "001485200" "" "" "" "" "" ""]}))
+          :arguments ["morriss.t" "001485200" "" "" "" "" "" ""]}))
 
 (comment
   (main-default))
