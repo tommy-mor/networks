@@ -3,9 +3,11 @@
    [clojure.tools.cli :refer [parse-opts]]
    [clj-commons.byte-streams :refer [to-byte-arrays convert]]
    [clojure.term.colors :refer [blue on-red]]
-   [clojure.set])
+   [clojure.set]
+   [clojure.java.io :as io])
   (:import (javax.net.ssl SSLSocket SSLSocketFactory)
-           (java.io PrintWriter InputStreamReader BufferedReader))
+           (java.io PrintWriter InputStreamReader)
+           (java.util.zip GZIPInputStream))
   (:gen-class))
 
 (set! *warn-on-reflection* false)
@@ -33,15 +35,18 @@
 (defn login-page [{:keys [port server]}]
   (str "https://" server ":" port "/accounts/login/"))
 
-(def socket (atom nil))
+(defonce socket (atom nil))
 
 (defn connect [{:keys [port server] :as opts}]
   (when-not @socket
+    
     (let [factory (SSLSocketFactory/getDefault)
           s (.createSocket factory ^String server ^int port)]
       (.startHandshake ^SSLSocket s)
+      (println "completed handshake")
       (reset! socket {:socket s
-                      :in (BufferedReader. (InputStreamReader. (.getInputStream s)))
+                      :in (.getInputStream s)
+                      :stringreader ()
                       :out (PrintWriter. (.getOutputStream s))}))))
 
 (def cookies (atom {}))
@@ -54,67 +59,76 @@
                             (into {}))))
 
 (defn char-seq 
-  [^java.io.Reader rdr]
+  [rdr]
   (let [chr (.read rdr)]
     (if (>= chr 0)
       (cons chr (lazy-seq (char-seq rdr))))))
 
 (defn REQ [opts {:keys [method url headers body]}]
   (connect opts)
-  (try
-    (let [{:keys [socket in out]} @socket
-          {:keys [port server]} opts
-          start (now)]
-      (println (blue (str method " " url)))
-      (.println out (str method " " url " HTTP/1.1"))
-      (.println out (str "Host: " server))
-      (.println out "Connection: Keep-Alive")
-      (when (not-empty body)
-        (.println out (str "Content-Length: " (count body))))
-      
-      (when headers
-        (doseq [[k v] headers]
-          (.println out (str k ": " v))))
-      
-      (.println out (str "cookie: "
-                         (clojure.string/join "; "
-                                              (map #(clojure.string/join "=" %)
-                                                   @cookies))))
-      (.println out "")
-
-      (when (not-empty body)
-        (println "body:" body)
-        (.println out body))
-      
-      (.println out "")
-      
-      (.flush out)
-
-      (let [status (-> in .readLine)
-            headers (->> (repeatedly #(-> in .readLine))
-                         (take-while #(not (empty? %)))
-                         (map #(clojure.string/split % #": *" 2))
-                         (group-by first)
-                         (map (fn [[k v]] [k (map second v)]))
-                         (into {}))
-
-            content-length (Integer/parseInt (first (get headers "Content-Length" "0")))
-
-            body (->> (char-seq in)
-                      (take content-length)
-                      (map char)
-                      clojure.string/join)]
-        (read-cookies headers)
-        {:url url
-         :status status
-         :headers headers
-         :body body
-         :time (- (now) start)}))
+  (let [{:keys [socket in out]} @socket
+        {:keys [port server]} opts
+        start (now)]
+    (println (blue (str method " " url)))
+    (.println out (str method " " url " HTTP/1.1"))
+    (.println out (str "Host: " server))
+    (.println out "Connection: Keep-Alive")
+    (.println out "Accept-Encoding: gzip")
     
-    (finally
-      (when @socket
-        (.close (:socket @socket))
-        (reset! socket nil)))))
+    (when (not-empty body)
+      (.println out (str "Content-Length: " (count body))))
+    
+    (when headers
+      (doseq [[k v] headers]
+        (.println out (str k ": " v))))
+    
+    (.println out (str "cookie: "
+                       (clojure.string/join "; "
+                                            (map #(clojure.string/join "=" %)
+                                                 @cookies))))
+    (.println out "")
+
+    (when (not-empty body)
+      (println "body:" body)
+      (.println out body))
+    
+    (.println out "")
+    
+    (.flush out)
+    
+    (let [readline (fn [in] (->> (repeatedly (fn []
+                                               (.read in)))
+                                 (filter #(not= % -1))
+                                 (take-while #(not= (char %) \newline))
+                                 (map char)
+                                 (drop-last)
+                                 clojure.string/join) )
+          reader in
+          status (-> reader readline)
+          remember (fn [coll]
+                     (def coll coll)
+                     coll)
+          headers (->> (repeatedly #(-> reader readline))
+                       (take-while #(not (empty? %)))
+                       remember
+                       (map #(clojure.string/split % #": *" 2))
+                       (group-by first)
+                       (map (fn [[k v]] [k (map second v)]))
+                       (into {}))
+          
+          content-length (Integer/parseInt (first (get headers "Content-Length" "0")))
+          
+          encoding (first (get headers "Content-Encoding"))
+          body (if (not (zero? content-length))
+                 (let [byts (take content-length (repeatedly #(.read in)))]
+                   (slurp (GZIPInputStream. (io/input-stream (byte-array byts))))) 
+                 "")]
+      (read-cookies headers)
+      {:url url
+       :status status
+       :headers headers
+       :body body
+       :time (- (now) start)}))) 
 
 (def horizon (atom #{}))
 (def visited (atom #{}))
@@ -186,19 +200,25 @@
             :error (.getMessage e)}))))
 
 (defn crawl [{:keys [arguments] {:keys [port server] :as opts} :options}]
-  (let [[username password] (filter (complement empty?) arguments)]
-    (let [csrf-token (extract-csrf (:body (REQ opts {:method "GET"
-                                                     :url (login-page opts)})))
-          login (REQ-follow opts {:method "POST"
-                                  :url (login-page opts)
-                                  :headers {"Content-Type" "application/x-www-form-urlencoded"}
-                                  :body (str "username=" username
-                                             "&password=" password
-                                             "&csrfmiddlewaretoken=" csrf-token
-                                             "&next=/fakebook/")})]
-      (swap! horizon conj (:url login))
-      (while (not (empty? (clojure.set/difference @horizon @visited)))
-        (visit opts (first (clojure.set/difference @horizon @visited)))))))
+  (try
+    (let [[username password] (filter (complement empty?) arguments)]
+      (let [csrf-token (extract-csrf (:body (REQ opts {:method "GET"
+                                                       :url (login-page opts)})))
+            login (REQ-follow opts {:method "POST"
+                                    :url (login-page opts)
+                                    :headers {"Content-Type" "application/x-www-form-urlencoded"}
+                                    :body (str "username=" username
+                                               "&password=" password
+                                               "&csrfmiddlewaretoken=" csrf-token
+                                               "&next=/fakebook/")})]
+        (swap! horizon conj (:url login))
+        (spit "body.txt" "" :append false)
+        (while (not (empty? (clojure.set/difference @horizon @visited)))
+          (visit opts (first (clojure.set/difference @horizon @visited))))))
+    (finally
+      (when @socket
+        (.close (:socket @socket))
+        (reset! socket nil)))))
 
 (def cli-options
   [["-p" "--port PORT" "port number"
