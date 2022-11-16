@@ -247,8 +247,6 @@
   #_(println "starting!!")
   (crawl {:options {:port 443, :server "proj5.3700.network"}
           :arguments ["morriss.t" "001485200" "" "" "" "" "" ""]}))
-true
-
 (comment
   (main-default))
 
