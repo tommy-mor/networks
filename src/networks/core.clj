@@ -17,6 +17,12 @@
   (spit "log.edn"
         (str (pr-str thing)
              "\n\n") :append true))
+
+(defn log-body [body]
+  (spit "body.txt"
+        (str body
+             "\n\n") :append true))
+
 (defn loge [& e]
   (binding [*out* *err*]
     (apply println e)))
@@ -170,7 +176,7 @@
       (when flag
         (println (blue "OMG FOUND FLAG" flag))
         (swap! flags conj flag))
-      (log {:url url})
+      (log-body (:body resp))
       {:url url
        :links links
        :resp resp})
