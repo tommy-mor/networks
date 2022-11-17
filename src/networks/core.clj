@@ -17,14 +17,14 @@
   (inst-ms (java.time.Instant/now)))
 
 (defn log [thing]
-  (comment (spit "log.edn"
-                 (str (pr-str thing)
-                      "\n\n") :append true)))
+  (spit "log.edn"
+        (str (pr-str thing)
+             "\n\n") :append true))
 
 (defn log-body [body]
-  (comment (spit "body.txt"
-                 (str body
-                      "\n\n") :append true)))
+  (spit "body.txt"
+        (str body
+             "\n\n") :append true))
 
 (defn loge [& e]
   (binding [*out* *err*]
@@ -54,12 +54,6 @@
                             (map #(take 2 %))
                             (map vec)
                             (into {}))))
-
-(defn char-seq 
-  [rdr]
-  (let [chr (.read rdr)]
-    (if (>= chr 0)
-      (cons chr (lazy-seq (char-seq rdr))))))
 
 (defn REQ [socket opts {:keys [method url headers body]}]
   (let [{:keys [socket in out]} socket
@@ -110,20 +104,29 @@
                        (group-by first)
                        (map (fn [[k v]] [k (map second v)]))
                        (into {}))
+          _ (def headers headers)
           
           content-length (Integer/parseInt (first (get headers "Content-Length" "0")))
           
           encoding (first (get headers "Content-Encoding"))
+          
+          _ (def encoding encoding)
+          
           body (if (not (zero? content-length))
-                 (let [byts (take content-length (repeatedly #(.read in)))]
-                   (slurp (GZIPInputStream. (io/input-stream (byte-array byts))))) 
-                 "")]
+                 (let [byts (take content-length (repeatedly #(.read in)))
+                       is (io/input-stream (byte-array byts))]
+                   
+                   (slurp (if (and encoding (clojure.string/includes? encoding "gzip"))
+                            (GZIPInputStream. is)
+                            is)))
+                 "")
+          _ (def body body)]
       (read-cookies headers)
       {:url url
        :status status
        :headers headers
        :body body
-       :time (- (now) start)}))) 
+       :time (- (now) start)})))
 
 (def horizon (atom #{}))
 (def visited (atom #{}))
@@ -198,23 +201,29 @@
       ))
   socket)
 
+(defn login [opts socket username password]
+  (println "logging in")
+  (let [csrf-token (extract-csrf (:body (REQ socket opts {:method "GET"
+                                                          :url (login-page opts)})))
+        login (REQ-follow
+               socket
+               opts
+               {:method "POST"
+                :url (login-page opts)
+                :headers {"Content-Type" "application/x-www-form-urlencoded"}
+                :body (str "username=" username
+                           "&password=" password
+                           "&csrfmiddlewaretoken=" csrf-token
+                           "&next=/fakebook/")})
+        
+        ]
+    login))
+
 (defn crawl [{:keys [arguments] {:keys [port server] :as opts} :options}]
   (let [[username password] (filter (complement empty?) arguments)]
     (let [socket (connect opts)
-          csrf-token (extract-csrf (:body (REQ socket opts {:method "GET"
-                                                            :url (login-page opts)})))
-          login (REQ-follow
-                 socket
-                 opts
-                 {:method "POST"
-                  :url (login-page opts)
-                  :headers {"Content-Type" "application/x-www-form-urlencoded"}
-                  :body (str "username=" username
-                             "&password=" password
-                             "&csrfmiddlewaretoken=" csrf-token
-                             "&next=/fakebook/")})
-          free-connections (async/chan 100)
-          ]
+          login (login opts socket username password)
+          free-connections (async/chan 100)]
       (swap! horizon conj (:url login))
       (spit "body.txt" "" :append false)
       
@@ -244,9 +253,17 @@
   (crawl (parse-opts args cli-options)))
 
 (defn main-default []
-  #_(println "starting!!")
+  (println "starting!!")
   (crawl {:options {:port 443, :server "proj5.3700.network"}
-          :arguments ["morriss.t" "001485200" "" "" "" "" "" ""]}))
+            :arguments ["morriss.t" "001485200" "" "" "" "" "" ""]})
+  #_(let [opts {:port 443, :server "proj5.3700.network"}
+        socket (connect opts)
+        resp (login opts socket "morriss.t" "001485200")]
+    (def resp resp)
+    (prn resp)
+    (.close (:socket socket))
+    resp))
+
 (comment
   (main-default))
 
