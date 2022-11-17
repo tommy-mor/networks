@@ -1,17 +1,15 @@
 all of the code is in src/networks/core.clj
 
+
+high level approach:
+connect/login to the server, then start sending 5 concurrent keep-alive connections gzipped.
+then read response (headers and body) using regexes. keep track of the horizon using atoms (thread safe clojure thing) on line 131.
+
 problem i faced:
-  some commands returned two responses.
-    that was tricky to handle, because i was getting the second response of the first command when I wanted the first response of the second command. I got around this by polling in a loop (core.clj:22)
+it was really tricky to get the gizpped responses to work. mostly becuase (it took me a while to figure out) that I couldn't use bufferedreader on the tcp stream. this java object gives you readline, but has to buffer the input.
+so theres a chance that it will eat some of your gzip data in its buffer before the gizpinputstreamreader can read it. So I had to just use the raw inputstream, and write my own readline (line 88).
 
-  another problem i faced was that it would sometimes not take the entire stream when I asked it to.
-  I don't know how to figure this out.
+Next challenge was concurrency, but that was made pretty easy by clojure.core.async. Open 5 tcp connections, put them on a channel. Whenever there is a free connection, grab it and run a pending horizon request on it.
 
-
-other than that was pretty straightforward.
-
-I tested by running commands in the clojure repl and seeing what they did.
-then I made some scripts to test the moving logic and cli arg parsing.
-then I uploaded to gradescope.
-
-for parsing the url, i just used java.net.URI. java is epic
+How I tested my code:
+I ran it interactively in the repl, and when something was wrong I inspected a value (put in an inline def, like on line 107, 113, 123), and could then inspect/manipulate that value in the repl.
