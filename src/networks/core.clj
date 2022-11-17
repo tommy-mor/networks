@@ -202,7 +202,6 @@
   socket)
 
 (defn login [opts socket username password]
-  (println "logging in")
   (let [csrf-token (extract-csrf (:body (REQ socket opts {:method "GET"
                                                           :url (login-page opts)})))
         login (REQ-follow
