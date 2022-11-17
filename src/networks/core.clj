@@ -232,7 +232,9 @@
       (dotimes [i 4]
         (async/>!! free-connections (connect opts)))
       
-      (while (not (empty? (clojure.set/difference @horizon @visited)))
+      (while (and
+              (< (count @flags) 5)
+              (not (empty? (clojure.set/difference @horizon @visited))))
         (if-let [target (first (clojure.set/difference @horizon @visited @active))]
           (do (swap! active conj target)
               (go
