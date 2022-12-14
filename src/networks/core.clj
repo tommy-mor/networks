@@ -38,16 +38,26 @@
 
 (def socket (atom nil))
 (def port (atom nil))
+(def other-replicas (atom #{}))
 
 (def myid (atom nil))
 (def mystate (atom :follower))
 (def leader (atom nil))
+
 (def data (atom {}))
-(def last-heartbeat (atom (now)))
+(def tape (atom []))
+(def commit-index (atom 0))
+(def last-applied (atom 0))
+
+(def leader-state (atom nil))
+
 (def term (atom 0))
 (def voted-for (atom nil))
 (def voted-for-term (atom nil))
+
+(def last-heartbeat (atom (now)))
 (def timeout-ms (rand-nth (range 1000 3000)))
+
 (println "timeout-ms" timeout-ms)
 (def majority (atom nil))
 
@@ -95,15 +105,25 @@
         :else
         (send (v))))
 
+(defn put [{:keys [src dst MID key value] :as req}]
+  (let [log-entry {:type :put :key key :value value :term @term}]
+    (swap! tape conj log-entry)
+    (loop [tosend (vec @other-replicas)
+           received #{}]
+      
+      (let [dst (first tosend)]
+        (send {:type :rpc/append-entries
+               :src @myid :dst dst :entries [{:type :put :key key :value value :term @term}]}))))
+  (swap! data assoc key value)
+  {:type "ok" :src dst :dst src :MID MID})
+
 (defmethod respond :get [{:keys [src dst key MID] :as req}]
   (log [@data key])
   (putget req (constantly {:MID MID :type "ok" :src dst :dst src :key key :value (or (get @data key) "")})))
 
 (defmethod respond :put [{:keys [src dst MID key value] :as req} ]
   (putget req
-   (fn []
-     (swap! data assoc key value)
-     {:type "ok" :src dst :dst src :MID MID})))
+          (put req)))
 
 (defmethod respond :rpc/request-vote [{:keys [src dst MID term candidate last-log-index last-log-term] :as req}]
   (log req)
@@ -167,6 +187,8 @@
         (println "i am elected leader :) " @myid)
         (reset! mystate :leader)
         (reset! leader @myid)
+        (reset! leader-state {:next-index (into {} (map (fn [r] [r (inc (count @log))])) @other-replicas)
+                              :match-index  (into {} (map (fn [r] [r 0])) @other-replicas)})
         (send-heartbeat))
       
       (let [data (receive)]
@@ -206,6 +228,7 @@
   (reset! port (Integer/parseInt myport))
   (reset! myid myidd)
   (reset! majority (inc (quot (inc (count replicaids)) 2)))
+  (reset! other-replicas (set replicaids))
   (send {:src @myid :dst "FFFF" :type "hello"})
   (while true
     (when (and (not= @mystate :leader)
@@ -214,6 +237,15 @@
     (let [data (receive)]
       (if (not= data :timeout)
         (respond (json/parse-string data keyword))))))
+
+"TODO
+Current terms are exchanged
+whenever servers communicate; if one server’s current
+term is smaller than the other’s, then it updates its current
+term to the larger value. If a candidate or leader discovers
+that its term is out of date, it immediately reverts to follower state. If a server receives a request with a stale term
+number, it rejects the request.
+"
 
 (comment
   (main-default))
