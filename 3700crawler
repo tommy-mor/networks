@@ -1,2 +1,0 @@
-#!/bin/sh 
-exec java -Dclojure.core.async.pool-size=3 -jar target/networks.jar "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
