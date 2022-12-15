@@ -132,14 +132,23 @@
 (defn put [{:keys [src dst MID key value] :as req}]
   (let [log-entry {:type :put :key key :value value :term @term}]
     (swap! tape conj log-entry)
-    (loop [tosend (vec @other-replicas)
-           received #{}]
-      
-      (let [dst (first tosend)]
-        (send {:type :rpc/append-entries
-               :src @myid :dst dst :entries [{:type :put :key key :value value :term @term}]}))))
+
+    "this can take potentially a long time, because it might trigger entire log refilling loop.
+     BUT we only block here until we get majority votes.."
+    (let [append-responses (async/chan 100)]
+      (doseq [dst @other-replicas]
+        (go
+          (println "sending rpc to dst" dst)
+          (async/>! append-responses
+                    (send-rpc :rpc/append-entries
+                              {:dst dst :entries [{:type :put :key key :value value :term @term}]}))
+          (println "done")))
+      (loop []
+        (println "response from channel DEBUG" (async/<!! append-responses))
+        (recur)))
+    
   (swap! data assoc key value)
-  {:type "ok" :src dst :dst src :MID MID})
+  {:type "ok" :src dst :dst src :MID MID}))
 
 (defmethod respond :get [{:keys [src dst key MID] :as req}]
   (log [@data key])
@@ -161,10 +170,13 @@
       (reset! voted-for candidate)
       (reset! voted-for-term term)
       (reply req {:term term :vote-granted true}))
-    (reply {:term term :vote-granted false})))
+    (reply req {:term term :vote-granted false})))
 
 (defmethod respond-rpc :rpc/append-entries [{:keys [src dst MID prev-log-index prev-log-term entries leader-commit] :as req}]
+  (println "mystate appendentries" @mystate)
   (assert (= @mystate :follower) "this should only be possible for followers")
+
+  (println "i have been told to appendentries by " src)
   
   (log req)
   (reset! last-heartbeat (now))
@@ -217,7 +229,6 @@
 
 (add-watch external-requests :external-requests
            (fn [k r o n]
-             (println "external-requests" n)
              n))
 
 (add-watch rpc-requests :rpc-requests
@@ -236,7 +247,7 @@
             :rpc/request (swap! rpc-requests conj data)
             :rpc/response (swap! rpc-response assoc (:rpc/mid data) data)
             (do
-              (println "external request" data)
+              (println "external request")
               (swap! external-requests conj data)))
           
           (recur))))))
@@ -263,13 +274,19 @@
             
             (Thread/sleep 10)
             (recur)))
-  (future (loop []
-            (when (not-empty @rpc-requests)
-              (let [req (first @rpc-requests)]
-                (swap! rpc-requests rest)
-                (respond-rpc req)))
-            (Thread/sleep 10)
-            (recur)))
+  (future (while true
+            (println "rpc-requests" @rpc-requests)
+            (try
+              
+              (when (not-empty @rpc-requests)
+                (let [req (first @rpc-requests)]
+                  (println "responding to rpc request" req)
+                  (swap! rpc-requests rest)
+                  (respond-rpc req)))
+              (catch Exception e
+                (log e)
+                (println "erhm" e)))
+            (Thread/sleep 10)))
   
   (while true
     (when (not-empty @external-requests)
