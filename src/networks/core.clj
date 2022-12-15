@@ -146,13 +146,21 @@
                                :entries [{:type :put :key key :value value :term @term}]
                                :term @term
                                :leader @myid
-                               :prev-log-index (dec (count @tape))
-                               :prev-log-term (get-in @tape [(dec (count @tape)) :term])
-                               :leader-commit @commit-index}))
-          (println "done")))
-      (loop []
-        (println "response from channel DEBUG" (async/<!! append-responses))
-        (recur)))
+                               :prev-log-index (dec (dec (count @tape)))
+                               :prev-log-term (get-in @tape [(dec (dec (count @tape))) :term])
+                               :leader-commit @commit-index}))))
+      (loop [received 0]
+        (if (= received @majority)
+          (println "got majority")
+          (let [resp (async/<!! append-responses)]
+            ;; TODO need to update my current term if there is a new one.... maybe thats handled
+            ;; in other loop
+            (if (and (= (:term resp) @term)
+                     (:success resp))
+              (recur (inc received))
+              (recur received))))))
+    
+    (reset! commit-index (dec (count @tape)))
     
   (swap! data assoc key value)
   {:type "ok" :src dst :dst src :MID MID}))
@@ -179,21 +187,60 @@
       (reply req {:term term :vote-granted true}))
     (reply req {:term term :vote-granted false})))
 
+(defn apply-log-entry [entry]
+  (println "entry" (pr-str entry))
+  (case (:type entry)
+    "put" (swap! data assoc (:key entry) (:value entry))))
+  
+(defn update-state-machine []
+  (let [entries (subvec @tape @last-applied (inc @commit-index))]
+    (doseq [entry entries]
+      (apply-log-entry entry)
+      (swap! last-applied inc))))
+
 (defmethod respond-rpc :rpc/append-entries [{:keys [src dst prev-log-index
                                                     prev-log-term
                                                     entries leader-commit] :as req}]
-  (println "mystate appendentries" @mystate)
   (if-not (= @mystate :follower) (while true (println "should not be possible!!")
                                         (System/exit 1)))
 
-  (println "i have been told to appendentries by " src)
-  
-  (log req)
-  (reset! last-heartbeat (now))
-  (reset! leader (:leader req))
-  ;; TODO maybe only reset this if we check the termid..
-  (reset! term (:term req))
-  (reply req {:term @term :success true}))
+  "TODO 3. If an existing entry conflicts with a new one (same index
+but different terms), delete the existing entry and all that
+follow it (§5.3)"
+
+  (cond (> @term (:term req))
+        (do
+          (println "got append entries from leader with lower term")
+          (reply req {:term @term :success false}))
+        
+        (not= (get-in @tape [prev-log-index :term])
+              prev-log-term)
+        (do
+          (println "got append entries from leader with wrong prev-log-term")
+          (reply req {:term @term :success false}))
+
+        :else
+        (do
+
+          
+          
+          (reset! tape (vec (concat @tape entries)))
+          (reset! commit-index (min leader-commit (dec (count @tape))))
+          
+          (logf (str "tape" @myid) [:before @tape entries])
+          (update-state-machine)
+          (logf (str "tape" @myid) [:after @tape entries])
+          
+          (reset! last-heartbeat (now))
+          (reset! leader (:leader req))
+          ;; TODO maybe only reset this if we check the termid..
+          (reset! term (:term req))
+
+          ;; TODO check things correctly here..
+
+
+
+          (reply req {:term @term :success true}))))
 
 (defn send-heartbeat []
   (send-rpc :rpc/append-entries
@@ -205,6 +252,7 @@
              :entries []
              :leader-commit (count @data)})
   (reset! last-heartbeat (now)))
+
 
 (defn start-election []
   (assert (= @mystate :follower) )
@@ -285,9 +333,9 @@
   (send {:src @myid :dst "FFFF" :type "hello"})
   
   
-  (future (while true
-            (println "my state is " @mystate)
-            (Thread/sleep 100)))
+  (comment (future (while true
+                     (println "my state is " @mystate)
+                     (Thread/sleep 100))))
   (future (read-loop))
   (future (loop []
             (when (and (not= @mystate :leader)
