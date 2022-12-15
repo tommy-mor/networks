@@ -95,8 +95,6 @@
   (let [mid (:rpc/mid req) 
         data (assoc data :rpc/mid mid :type :rpc/response
                     :src @myid :dst (:src req))]
-    (println "responding to " "with " data)
-    
     (send data)))
 
 (def rpc-response (atom {}))
@@ -122,7 +120,8 @@
 (defn putget [{:keys [src dst MID] :as req} v]
   (log req)
   (cond (nil? @leader)
-        (send {:MID MID :type "fail" :src dst :dst src})
+        (do
+          (send {:MID MID :type "fail" :src dst :dst src}))
         
         (not= @mystate :leader)
         (send {:MID MID :type "redirect" :src dst :dst src})
@@ -139,7 +138,6 @@
     (let [append-responses (async/chan 100)]
       (doseq [dst @other-replicas]
         (go
-          (println "sending rpc to dst" dst)
           (async/>! append-responses
                     (send-rpc :rpc/append-entries
                               {:dst dst
@@ -167,7 +165,12 @@
 
 (defmethod respond :get [{:keys [src dst key MID] :as req}]
   (log [@data key])
-  (putget req (constantly {:MID MID :type "ok" :src dst :dst src :key key :value (or (get @data key) "")})))
+  (putget req
+          (constantly
+           {:MID MID :type "ok" :src dst :dst src :key key :value (or (get @data key)
+                                                                      (do
+                                                                        (println "missing key" key)
+                                                                        ""))})))
 
 (defmethod respond :put [{:keys [src dst MID key value] :as req} ]
   (putget req
@@ -188,7 +191,6 @@
     (reply req {:term term :vote-granted false})))
 
 (defn apply-log-entry [entry]
-  (println "entry" (pr-str entry))
   (case (:type entry)
     "put" (swap! data assoc (:key entry) (:value entry))))
   
@@ -261,8 +263,6 @@ follow it (§5.3)"
     (reset! mystate :candidate)
     (reset! voted-for @myid)
     (reset! voted-for-term @term)
-    (println "other replicas" @other-replicas)
-    
     (let [votes (vec (pmap (fn [dst]
                              (send-rpc :rpc/request-vote
                                        {:dst dst
@@ -290,6 +290,7 @@ follow it (§5.3)"
 
 (add-watch external-requests :external-requests
            (fn [k r o n]
+             (comment (println "external-requests" (count @external-requests)))
              n))
 
 (add-watch mystate :my-state
@@ -313,7 +314,6 @@ follow it (§5.3)"
             :rpc/request (swap! rpc-requests conj data)
             :rpc/response (swap! rpc-response assoc (:rpc/mid data) data)
             (do
-              (println "external request")
               (swap! external-requests conj data)))
           
           (recur))))))
@@ -364,7 +364,6 @@ follow it (§5.3)"
                     (reset! leader (:src req)))
                   
                   (reset! last-heartbeat (now))
-                  (println "responding to rpc request" req)
                   (respond-rpc req)))
               (catch Exception e
                 (log e)
@@ -373,9 +372,9 @@ follow it (§5.3)"
   
   (while true
     (when (not-empty @external-requests)
-      (println "responding to external request")
-      (respond (first @external-requests))
-      (swap! external-requests rest))
+      (let [req (first @external-requests)]
+        (swap! external-requests rest)
+        (respond req)))
     (Thread/sleep 10)))
 
 "TODO
