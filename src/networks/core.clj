@@ -44,10 +44,9 @@
 (def mystate (atom :follower))
 (def leader (atom nil))
 
-(def data (atom {}))
+(def data (atom {:last-applied -1 :store {}}))
 (def tape (atom []))
-(def commit-index (atom 0))
-(def last-applied (atom 0))
+(def commit-index (atom -1))
 
 (def leader-state (atom nil))
 
@@ -117,16 +116,6 @@
 (defmulti respond (fn [data] (keyword (:type data))))
 
 
-(defn apply-log-entry [entry]
-  (case (:type entry)
-    "put" (swap! data assoc (:key entry) (:value entry))))
- 
-(defn update-state-machine []
-  (let [entries (subvec @tape @last-applied (inc @commit-index))]
-    (doseq [entry entries]
-      (apply-log-entry entry)
-      (swap! last-applied inc))))
-
 (defn putget [{:keys [src dst MID] :as req} v]
   (log req)
   (cond (nil? @leader)
@@ -139,50 +128,93 @@
         :else
         (send (v))))
 
-(defn send-log-entries [answers dst]
+"{{{{at append, just trigger update, (send commands to agent), then spin on @leader-state until we commit. don't use channel. send when state machine updated}}}}"
+(add-watch leader-state :leader->commited
+           (fn [_ _ _ new]
+             "
+      If there exists an N such that N > commitIndex, a majority
+      of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+      set commitIndex = N 
+      "
+             (swap! commit-index
+                    (fn [current-index]
+                      (loop [potential-index (inc current-index)]
+                        (if (and (>= (count (filter (fn [[k v]] (>= v potential-index))
+                                                    (:match-index new)))
+                                     @majority)
+                                 (= @term (:term (get @tape potential-index))))
+                          (recur (inc potential-index))
+                          (dec potential-index)))))))
+(defn apply-log-entry [m entry]
+  (case (:type entry)
+    "put" (assoc m (:key entry) (:value entry))))
+
+(add-watch commit-index :apply-committed-log
+           (fn [_ _ old new]
+             
+             (println "comitting" old "->" new "tape" @tape @data)
+             
+             (when (not= old new) 
+               (swap! data
+                      (fn [m items]
+                        {:store (reduce apply-log-entry
+                                        (:store m)
+                                        items)
+                         :last-applied new})
+                      (let [items (subvec @tape (inc old) (inc new))]
+                        items)))))
+
+(defn send-log-entries [dst]
   "takes info from @leader-state, then sends the correct log entry for that."
-  (prn [ "leader state" @leader-state])
-  (async/>! answers
-            (send-rpc :rpc/append-entries
-                      {:dst dst
-                       :entries []
-                       :term @term
-                       :leader @myid
-                       :prev-log-index (dec (dec (count @tape)))
-                       :prev-log-term (get-in @tape [(dec (dec (count @tape))) :term])
-                       :leader-commit @commit-index})))
+  (let [last-log-index (dec (count @tape))
+        next-index-follower (get-in @leader-state [:next-index dst])
+        entries-to-send (subvec @tape next-index-follower)]
+    (comment (prn [dst
+                   "my last log index " last-log-index
+                   "follower next index" next-index-follower
+                   "entries to send" entries-to-send]))
+    (if (>= last-log-index next-index-follower) ;; TODO I think I can get rid of this, and use this fn to send heartbeats as well...
+      
+      (let [resp (send-rpc :rpc/append-entries
+                           {:dst dst
+                            :entries entries-to-send
+                            :term @term
+                            :leader @myid
+                            :prev-log-index (dec next-index-follower)
+                            :prev-log-term (get-in @tape [(dec next-index-follower) :term])
+                            :leader-commit @commit-index})]
+        (if (:success resp)
+          (swap! leader-state
+                 (fn [st]
+                   (-> st
+                       (assoc-in [:next-index dst] (inc last-log-index))
+                       (assoc-in [:match-index dst] last-log-index))))
+          (while true (println "FAILED APPENDENTRIES, dec next-index and retry")))))))
 
 (defn put [{:keys [src dst MID key value] :as req}]
   (let [log-entry {:type "put" :key key :value value :term @term}]
-    (swap! tape conj log-entry)
+    (let [this-put-idx (dec (count (swap! tape conj log-entry)))]
+      (prn ["new log entry" log-entry])
 
-    "this can take potentially a long time, because it might trigger entire log refilling loop.
+      "this can take potentially a long time, because it might trigger entire log refilling loop.
      BUT we only block here until we get majority votes.."
-    (let [append-responses (async/chan 100)]
-      (doseq [dst @other-replicas]
-        (go (send-log-entries append-responses dst)))
+      (let [append-responses (async/chan 100)]
+        (doseq [dst @other-replicas]
+          (go (send-log-entries dst))))
+
+      (while (not (>= (:last-applied @data) this-put-idx))
+        (println "this-put-idx" this-put-idx)
+        (Thread/sleep 10))
       
-      (loop [received 0]
-        (if (= received @majority)
-          (println "got majority")
-          (let [resp (async/<!! append-responses)]
-            ;; TODO need to update my current term if there is a new one.... maybe thats handled
-            ;; in other loop
-            (if (and (= (:term resp) @term)
-                     (:success resp))
-              (recur (inc received))
-              (recur received))))))
-    
-    (reset! commit-index (dec (count @tape)))
-    (update-state-machine)
-    
-    {:type "ok" :src dst :dst src :MID MID}))
+      (println "getting data!!" (get (:store @data) key) @data)
+      
+      {:type "ok" :src dst :dst src :MID MID})))
 
 (defmethod respond :get [{:keys [src dst key MID] :as req}]
   (log [@data key])
   (putget req
           (constantly
-           {:MID MID :type "ok" :src dst :dst src :key key :value (or (get @data key)
+           {:MID MID :type "ok" :src dst :dst src :key key :value (or (get (:store @data) key)
                                                                       (do
                                                                         (println "missing key" key)
                                                                         ""))})))
@@ -231,12 +263,11 @@ follow it (§5.3)"
 
           
           
-          (reset! tape (vec (concat @tape entries)))
-          (reset! commit-index (min leader-commit (dec (count @tape))))
+          (let [new-tape (vec (concat @tape entries))]
+            (reset! commit-index (min leader-commit (dec (count new-tape))))
+            (reset! tape new-tape))
           
-          (logf (str "tape" @myid) [:before @tape entries])
-          (update-state-machine)
-          (logf (str "tape" @myid) [:after @tape entries])
+          ;; watcher should update state machine here..
           
           (reset! last-heartbeat (now))
           (reset! leader (:leader req))
@@ -250,14 +281,15 @@ follow it (§5.3)"
           (reply req {:term @term :success true}))))
 
 (defn send-heartbeat []
+  (println "sending heartbeat")
   (send-rpc :rpc/append-entries
             {:dst "FFFF"
              :term @term :leader @myid
              
              :prev-log-index (count @data)
-             :prev-log-term @term
+             :prev-log-term @term  ;; TODO make sure this is right..
              :entries []
-             :leader-commit (count @data)})
+             :leader-commit @commit-index})
   (reset! last-heartbeat (now)))
 
 
@@ -284,8 +316,10 @@ follow it (§5.3)"
         ;; TODO add other ways that candidacy can go..
         (do
           (println "i am elected leader :) " @myid)
-          (reset! leader-state {:next-index (into {} (map (fn [r] [r (inc (count @tape))]) @other-replicas))
-                                :match-index  (into {} (map (fn [r] [r 0]) @other-replicas))})
+          (reset! leader-state {:next-index (into {} (map (fn [r] [r (count @tape)])
+                                                          @other-replicas))
+                                :match-index  (into {} (map (fn [r] [r 0])
+                                                            @other-replicas))})
           (reset! mystate :leader)
           (reset! leader @myid)
           (send-heartbeat))))))
@@ -377,7 +411,10 @@ follow it (§5.3)"
   (while true
     (when (not-empty @external-requests)
       (let [[[req & _] _] (swap-vals! external-requests rest)]
-        (respond req)))
+        (try 
+          (respond req)
+          (catch Exception e
+            (println "erhmreq" e)))))
     (Thread/sleep 0)))
 
 "TODO
