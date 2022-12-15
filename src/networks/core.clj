@@ -400,7 +400,7 @@ follow it (§5.3)"
   (reset! port (Integer/parseInt myport))
   (reset! myid myidd)
   (let [replicas (filter (complement empty?) replicaids)]
-    (reset! majority (inc (quot (inc (count replicas)) 2)))
+    (reset! majority (quot (inc (count replicas)) 2))
     (reset! other-replicas (set replicas)))
 
   (spit (str "received" @myid) "")
