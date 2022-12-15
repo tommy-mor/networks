@@ -98,24 +98,29 @@
     (send data)))
 
 (def rpc-response (atom {}))
-(defn send-rpc [method data]
-  (let [mid (str (java.util.UUID/randomUUID))
-        data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)
-        sent-at (now)]
-    (send data)
-    
-    (loop []
-      (let [resp (get @rpc-response mid)]
-        (if resp
-          (do
-            (swap! rpc-response dissoc mid)
-            resp)
-          (if (> (- (now) sent-at) 1000)
-            (do
-              (println "retrying!")
-              (send-rpc method data))
-            (do (Thread/sleep 1)
-                (recur))))))))
+(defn send-rpc
+  ([method data] (send-rpc method data 100 #{}))
+  ([method data timeout valid-responses]
+   (let [mid (str (java.util.UUID/randomUUID))
+         valid-responses (clojure.set/union valid-responses #{mid})
+         data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)
+         sent-at (now)]
+     (send data)
+
+     (loop []
+       (let [responses @rpc-response
+             k (first (clojure.set/intersection valid-responses (set (keys responses))))
+             resp (get responses k)]
+         (if resp
+           (do
+             (swap! rpc-response dissoc mid)
+             resp)
+           (if (> (- (now) sent-at) timeout)
+             (do
+               (println "retrying! timeout " timeout (:dst data))
+               (send-rpc method data (* 2 timeout) valid-responses))
+             (do (Thread/sleep 1)
+                 (recur)))))))))
       
 
 (defmulti respond (fn [data] (keyword (:type data))))
@@ -125,6 +130,7 @@
   (log req)
   (cond (nil? @leader)
         (do
+          (println "fail!!!")
           (send {:MID MID :type "fail" :src dst :dst src}))
         
         (not= @mystate :leader)
@@ -133,7 +139,6 @@
         :else
         (send (v))))
 
-"{{{{at append, just trigger update, (send commands to agent), then spin on @leader-state until we commit. don't use channel. send when state machine updated}}}}"
 (add-watch leader-state :leader->commited
            (fn [_ _ _ new]
              "
@@ -157,9 +162,11 @@
 (add-watch commit-index :apply-committed-log
            (fn [_ _ old new]
              
-             (when (not= old new) 
+             (when (and (not= old new)
+                        (> new old)) 
                (swap! data
                       (fn [m]
+                        #_(println "comttiing " old "->" new "m")
                         {:store (reduce apply-log-entry
                                         (:store m)
                                         (subvec (:tape m) (inc old) (inc new)))
@@ -195,22 +202,30 @@
           (while true (println "FAILED APPENDENTRIES, dec next-index and retry")))))))
 
 (defn put [{:keys [src dst MID key value] :as req}]
-  (let [log-entry {:type "put" :key key :value value :term @term}]
-    (let [this-put-idx (dec (count (:tape (swap! data update-in [:tape] conj log-entry))))]
+  (let [log-entry {:type "put" :key key :value value :term @term}
+        new-tape (:tape (swap! data update-in [:tape] conj log-entry))
+        this-put-idx (dec (count new-tape))]
+    (try
+      
       (prn ["new log entry" log-entry])
 
-      "this can take potentially a long time, because it might trigger entire log refilling loop.
-     BUT we only block here until we get majority votes.."
-      (let [append-responses (async/chan 100)]
-        (doseq [dst @other-replicas]
-          (go (send-log-entries dst))))
+      (doseq [dst @other-replicas]
+        (go (send-log-entries dst)))
 
+      (logf "before" MID)
+
+      ;; waits until has been committed and applied
       (while (not (>= (:last-applied @data) this-put-idx))
         (Thread/sleep 0))
       
+      (logf "after" MID)
+      
+      
       #_(println "getting data!!" (get (:store @data) key) @data)
       
-      {:type "ok" :src dst :dst src :MID MID})))
+      {:type "ok" :src dst :dst src :MID MID}
+      (catch Exception e
+        (println "put failed???" e)))))
 
 (defmethod respond :get [{:keys [src dst key MID] :as req}]
   (log [@data key])
@@ -254,13 +269,13 @@ follow it (§5.3)"
   (let [tape (:tape @data)]
     (cond (> @term (:term req))
           (do
-            (println "got append entries from leader with lower term")
+            (println "fail: got append entries from leader with lower term")
             (reply req {:term @term :success false}))
           
           (not= (get-in tape [prev-log-index :term])
                 prev-log-term)
           (do
-            (println "got append entries from leader with wrong prev-log-term")
+            (println "fail: got append entries from leader with wrong prev-log-term")
             (reply req {:term @term :success false}))
 
           :else
@@ -268,9 +283,10 @@ follow it (§5.3)"
 
             
             
+            #_(println "leader commit" leader-commit)
             (let [new-tape (vec (concat tape entries))]
-              (reset! commit-index (min leader-commit (dec (count new-tape))))
-              (swap! data assoc :tape new-tape))
+              (swap! data assoc :tape new-tape)
+              (reset! commit-index (min leader-commit (dec (count new-tape)))))
             
             ;; watcher should update state machine here..
             
@@ -335,7 +351,7 @@ follow it (§5.3)"
 
 (add-watch external-requests :external-requests
            (fn [k r o n]
-             (comment (println "external-requests" (count @external-requests)))
+             (logf "reqs" (count @external-requests))
              n))
 
 (add-watch mystate :my-state

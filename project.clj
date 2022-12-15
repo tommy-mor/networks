@@ -24,7 +24,7 @@
   {"native"
    ["shell"
     "native-image" "--report-unsupported-elements-at-runtime" "--no-server" "--no-fallback"
-    "--static" "--libc=musl"
+    "--static" #_"--libc=musl"
     "-H:+ReportExceptionStackTraces"
     "--initialize-at-build-time"
     "--allow-incomplete-classpath"
