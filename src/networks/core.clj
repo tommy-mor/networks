@@ -57,7 +57,7 @@
 (def voted-for-term (atom nil))
 
 (def last-heartbeat (atom (now)))
-(def timeout-ms (rand-nth (range 1000 3000)))
+(def timeout-ms (rand-nth (range 150 300)))
 
 (println "timeout-ms" timeout-ms)
 (def majority (atom nil))
@@ -103,6 +103,7 @@
 (defn send-rpc
   ([method data] (send-rpc method data rpc-timeout #{}))
   ([method data timeout valid-responses]
+   (reset! last-heartbeat (now))
    (if (or (get @crashed (:dst data))
            (> timeout (* rpc-timeout (Math/pow 2 4))))
      (do
@@ -213,7 +214,8 @@
 
               :else
               
-              (while true (println "FAILED APPENDENTRIES, dec next-index and retry")))))))
+              (while true (println "FAILED APPENDENTRIES, dec next-index and retry")
+                     (Thread/sleep 100)))))))
 
 (defn put [{:keys [src dst MID key value] :as req}]
   (let [log-entry {:type "put" :key key :value value :term @term}
@@ -256,17 +258,27 @@
 
 (defmulti respond-rpc (fn [data] (keyword (:rpc/method data))))
 
-(defmethod respond-rpc :rpc/request-vote [{:keys [src dst MID term candidate last-log-index last-log-term] :as req}]
+(defmethod respond-rpc :rpc/request-vote [{:keys [src dst MID candidate last-log-index last-log-term] :as req}]
   (log req)
   "TODO additional constraint "
-  (if (or (nil? @voted-for)
-          (and (= @voted-for candidate)
-               (= @voted-for-term term)))
-    (do
-      (reset! voted-for candidate)
-      (reset! voted-for-term term)
-      (reply req {:term term :vote-granted true}))
-    (reply req {:term term :vote-granted false})))
+
+  (cond (> @term (:term req))
+        (do (println "term too low")
+            (reply req {:term @term :vote-granted false}))
+
+        (or (nil? @voted-for)
+            (and (= @voted-for candidate)
+                 (= @voted-for-term term)))
+        (do
+          (println "accepted candidate in term" candidate "in term " @term)
+          (reset! voted-for candidate)
+          (reset! voted-for-term term)
+          (reply req {:term @term :vote-granted true}))
+
+        :else
+        (do
+          (println "rejected candidate" candidate)
+          (reply req {:term @term :vote-granted false}))))
 
 (defmethod respond-rpc :rpc/append-entries [{:keys [src dst prev-log-index
                                                     prev-log-term
@@ -280,16 +292,20 @@
 but different terms), delete the existing entry and all that
 follow it (§5.3)"
 
+  (reset! last-heartbeat (now))
   (let [tape (:tape @data)]
     (cond (> @term (:term req))
           (do
             (println "fail: got append entries from leader with lower term")
             (reply req {:term @term :success false}))
           
-          (not= (get-in tape [prev-log-index :term])
-                prev-log-term)
+          (and
+           (not= prev-log-index -1)
+           (not= (get-in tape [prev-log-index :term])
+                 prev-log-term))
           (do
-            (println "fail: got append entries from leader with wrong prev-log-term")
+            (println "fail: got append entries from leader with wrong prev-log-term"
+                     tape prev-log-index)
             (reply req {:term @term :success false}))
 
           :else
@@ -304,7 +320,6 @@ follow it (§5.3)"
             
             ;; watcher should update state machine here..
             
-            (reset! last-heartbeat (now))
             (reset! leader (:leader req))
             ;; TODO maybe only reset this if we check the termid..
             (reset! term (:term req))
@@ -317,30 +332,33 @@ follow it (§5.3)"
 
 (defn send-heartbeat []
   (println "sending heartbeat")
-  #_(send-rpc :rpc/append-entries
+  (reset! last-heartbeat (now))
+  (send-rpc :rpc/append-entries
             {:dst "FFFF"
              :term @term :leader @myid
              
-             :prev-log-index (count @data)
+             :prev-log-index (:last-applied @data)
              :prev-log-term @term  ;; TODO make sure this is right..
              :entries []
-             :leader-commit @commit-index})
-  (reset! last-heartbeat (now)))
+             :leader-commit @commit-index}))
 
 
 (defn start-election []
-  (assert (= @mystate :follower) )
+  (assert (= @mystate :follower))
+  (swap! term inc)
   (when (not= @voted-for-term @term)
-    (swap! term inc)
     (reset! mystate :candidate)
     (reset! voted-for @myid)
     (reset! voted-for-term @term)
+
+    (println "started election in term" @term)
+    ;; TODO pmap never finishes, so we cant win
     (let [votes (vec (pmap (fn [dst]
                              (send-rpc :rpc/request-vote
                                        {:dst dst
                                         :term @term
                                         :candidate @myid
-                                        :last-log-index (count (:tape @data))
+                                        :last-log-index (:last-applied @data)
                                         :last-log-term @term}))
                            (vec @other-replicas)))]
       (if (and (>= (count (filter (fn [v] (and (:vote-granted v)
@@ -357,7 +375,8 @@ follow it (§5.3)"
                                                             @other-replicas))})
           (reset! mystate :leader)
           (reset! leader @myid)
-          (send-heartbeat))))))
+          (send-heartbeat))
+        (println "election failed")))))
 
 
 (def external-requests (atom (list)))
@@ -416,13 +435,14 @@ follow it (§5.3)"
   (future (loop []
             (when (and (not= @mystate :leader)
                        (> (- (now) @last-heartbeat) timeout-ms))
+              (println "starting election")
               (start-election))
             
             (when (and (= @mystate :leader)
                        (> (- (now) @last-heartbeat) (/ timeout-ms 2)))
               (send-heartbeat))
             
-            (Thread/sleep 0)
+            (Thread/sleep 10)
             (recur)))
   
   (future (while true
@@ -435,7 +455,7 @@ follow it (§5.3)"
                     (reset! term (:term req))
                     (println "i am a follower now, saw term" @term)
                     (reset! mystate :follower)
-                    (reset! leader (:src req)))
+                    (reset! voted-for nil))
                   
                   (reset! last-heartbeat (now))
                   (respond-rpc req)))
