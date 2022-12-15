@@ -98,29 +98,37 @@
     (send data)))
 
 (def rpc-response (atom {}))
+(def rpc-timeout 10)
+(def crashed (atom #{}))
 (defn send-rpc
-  ([method data] (send-rpc method data 10 #{}))
+  ([method data] (send-rpc method data rpc-timeout #{}))
   ([method data timeout valid-responses]
-   (let [mid (str (java.util.UUID/randomUUID))
-         valid-responses (clojure.set/union valid-responses #{mid})
-         data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)
-         sent-at (now)]
-     (send data)
+   (if (or (get @crashed (:dst data))
+           (> timeout (* rpc-timeout (Math/pow 2 4))))
+     (do
+       (println "giving up on rpc")
+       (swap! crashed conj (:dst data))
+       :timed-out)
+     (let [mid (str (java.util.UUID/randomUUID))
+           valid-responses (clojure.set/union valid-responses #{mid})
+           data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)
+           sent-at (now)]
+       (send data)
 
-     (loop []
-       (let [responses @rpc-response
-             k (first (clojure.set/intersection valid-responses (set (keys responses))))
-             resp (get responses k)]
-         (if resp
-           (do
-             (swap! rpc-response dissoc mid)
-             resp)
-           (if (> (- (now) sent-at) timeout)
+       (loop []
+         (let [responses @rpc-response
+               k (first (clojure.set/intersection valid-responses (set (keys responses))))
+               resp (get responses k)]
+           (if resp
              (do
-               (println "retrying! timeout " timeout (:dst data))
-               (send-rpc method data (* 2 timeout) valid-responses))
-             (do (Thread/sleep 1)
-                 (recur)))))))))
+               (swap! rpc-response dissoc mid)
+               resp)
+             (if (> (- (now) sent-at) timeout)
+               (do
+                 (println "retrying! timeout " timeout (:dst data))
+                 (send-rpc method data (* 2 timeout) valid-responses))
+               (do (Thread/sleep 1)
+                   (recur))))))))))
       
 
 (defmulti respond (fn [data] (keyword (:type data))))
@@ -193,13 +201,19 @@
                             :prev-log-index (dec next-index-follower)
                             :prev-log-term (get-in tape [(dec next-index-follower) :term])
                             :leader-commit @commit-index})]
-        (if (:success resp)
-          (swap! leader-state
-                 (fn [st]
-                   (-> st
-                       (assoc-in [:next-index dst] (inc last-log-index))
-                       (assoc-in [:match-index dst] last-log-index))))
-          (while true (println "FAILED APPENDENTRIES, dec next-index and retry")))))))
+        (cond (:success resp)
+              (swap! leader-state
+                     (fn [st]
+                       (-> st
+                           (assoc-in [:next-index dst] (inc last-log-index))
+                           (assoc-in [:match-index dst] last-log-index))))
+
+              (= :timed-out resp)
+              (println "timed out")
+
+              :else
+              
+              (while true (println "FAILED APPENDENTRIES, dec next-index and retry")))))))
 
 (defn put [{:keys [src dst MID key value] :as req}]
   (let [log-entry {:type "put" :key key :value value :term @term}
