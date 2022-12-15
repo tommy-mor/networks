@@ -346,16 +346,14 @@ follow it (§5.3)"
                        (> (- (now) @last-heartbeat) (/ timeout-ms 2)))
               (send-heartbeat))
             
-            (Thread/sleep 10)
+            (Thread/sleep 1)
             (recur)))
   
   (future (while true
             (try
               
               (when (not-empty @rpc-requests)
-                (let [req (first @rpc-requests)]
-                  (swap! rpc-requests rest)
-                  
+                (let [[[req & _ ] _] (swap-vals! rpc-requests rest )]
                   (when (and (:term req)
                              (> (:term req) @term))
                     (reset! term (:term req))
@@ -368,14 +366,13 @@ follow it (§5.3)"
               (catch Exception e
                 (log e)
                 (println "erhm" e)))
-            (Thread/sleep 10)))
+            (Thread/sleep 1)))
   
   (while true
     (when (not-empty @external-requests)
-      (let [req (first @external-requests)]
-        (swap! external-requests rest)
+      (let [[[req & _] _] (swap-vals! external-requests rest)]
         (respond req)))
-    (Thread/sleep 10)))
+    (Thread/sleep 1)))
 
 "TODO
 Current terms are exchanged
