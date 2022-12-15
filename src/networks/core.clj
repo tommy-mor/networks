@@ -80,7 +80,6 @@
 
 (defn send [data]
   (let [data (assoc data :leader (or @leader "FFFF"))
-        _ (println "SENDING" data)
         bytes (-> data
                   json/generate-string
                   (.getBytes))
@@ -90,6 +89,35 @@
                                 @port
                                 )]
     (.send @socket packet)))
+
+
+(defn reply [req data]
+  (let [mid (:rpc/mid req) 
+        data (assoc data :rpc/mid mid :type :rpc/response
+                    :src @myid :dst (:src req))]
+    
+    (println "RPC SEND" data)
+    
+    (send data)))
+
+(def rpc-response (atom {}))
+(defn send-rpc [method data]
+  (let [mid (str (java.util.UUID/randomUUID))
+        data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)]
+    (println "RPC SEND" data)
+    
+    (send data)
+    
+    (loop []
+      (let [resp (get @rpc-response mid)]
+        (if resp
+          (do
+            (swap! rpc-response dissoc mid)
+            resp)
+          (do
+            (Thread/sleep 10)
+            (recur)))))))
+      
 
 (defmulti respond (fn [data] (keyword (:type data))))
 
@@ -125,7 +153,9 @@
   (putget req
           (put req)))
 
-(defmethod respond :rpc/request-vote [{:keys [src dst MID term candidate last-log-index last-log-term] :as req}]
+(defmulti respond-rpc (fn [data] (keyword (:rpc/method data))))
+
+(defmethod respond-rpc :rpc/request-vote [{:keys [src dst MID term candidate last-log-index last-log-term] :as req}]
   (log req)
   "TODO additional constraint "
   (if (or (nil? @voted-for)
@@ -134,93 +164,96 @@
     (do
       (reset! voted-for candidate)
       (reset! voted-for-term term)
-      (send {:type :rpc/request-vote-response :src dst :dst candidate :MID MID :term term :vote-granted true}))
-    (send {:type :rpc/request-vote-response :src dst :dst candidate :MID MID :term term :vote-granted false})))
+      (reply req {:term term :vote-granted true}))
+    (reply {:term term :vote-granted false})))
 
-(defmethod respond :rpc/request-vote-response [req]
-  (assert (= @mystate :leader) "this should only be possible for leaders"))
-
-(defmethod respond :rpc/append-entries [{:keys [src dst MID prev-log-index prev-log-term entries leader-commit] :as req}]
+(defmethod respond-rpc :rpc/append-entries [{:keys [src dst MID prev-log-index prev-log-term entries leader-commit] :as req}]
   (assert (= @mystate :follower) "this should only be possible for followers")
   
   (log req)
   (reset! last-heartbeat (now))
   (reset! leader (:leader req))
   (reset! term (:term req))
-  (send {:type :rpc/append-entries-response :src @myid :dst @leader :MID MID :term @term :success true}))
-
-(defmethod respond :rpc/append-entries-response [{:keys [src dst MID prev-log-index prev-log-term entries leader-commit] :as req}]
-  (assert (= @mystate :leader) "this should only be possible for leaders")
-  
-  (log req)
-  (reset! last-heartbeat (now))
-  (reset! term (:term req)))
+  (reply req {:term @term :success true}))
 
 (defn send-heartbeat []
-  (send {:type :rpc/append-entries
-         :src @myid :dst "FFFF"
-         :term @term :leader @myid
-         
-         :prev-log-index (count @data)
-         :prev-log-term @term
-         :entries []
-         :leader-commit (count @data)}))
+  (send-rpc :rpc/append-entries
+            {:dst "FFFF"
+             :term @term :leader @myid
+             
+             :prev-log-index (count @data)
+             :prev-log-term @term
+             :entries []
+             :leader-commit (count @data)}))
 
 (defn start-election []
-  (println "starting election")
-  (swap! term inc)
-  (reset! mystate :candidate)
-  (reset! voted-for @myid)
-  (reset! voted-for-term @term)
-  
-  (send {:type :rpc/request-vote
-         
-         :src @myid :dst "FFFF"
-         
-         :term @term :candidate @myid
-         :last-log-index (count @data)
-         :last-log-term @term})
-  
-  (loop [votes 0]
-    (if (= votes @majority)
-      (do
-        (println "i am elected leader :) " @myid)
-        (reset! mystate :leader)
-        (reset! leader @myid)
-        (reset! leader-state {:next-index (into {} (map (fn [r] [r (inc (count @log))])) @other-replicas)
-                              :match-index  (into {} (map (fn [r] [r 0])) @other-replicas)})
-        (send-heartbeat))
-      
-      (let [data (receive)]
-        (if (= :timeout data)
-          (recur votes)
-          (let [data (json/parse-string data keyword)]
-            (log data)
-            (case (keyword (:type data))
-              :rpc/request-vote-response
-              (do
-                (if (and (= (:term data) @term)
-                         (:vote-granted data))
-                  (recur (inc votes))
-                  (recur votes)))
+  (assert (= @mystate :follower) )
+  (when (not= @voted-for-term @term)
+    (println "starting election, term" (inc @term) "voted-for" @voted-for-term)
+    (println "starting election" (inc @term))
+    (swap! term inc)
+    (reset! mystate :candidate)
+    (reset! voted-for @myid)
+    (reset! voted-for-term @term)
+    
+    (let [votes (vec (pmap (fn [dst]
+                             (println "asking for vote from " dst)
+                             (send-rpc :rpc/request-vote
+                                       {:dst dst
+                                        :term @term
+                                        :candidate @myid
+                                        :last-log-index (count @data)
+                                        :last-log-term @term}))
+                           (vec @other-replicas)))]
+      (println "votes!!" votes)
+      (logf "votes" votes)
+      (println "mystate" @mystate)
+      (if (and (>= (count (filter (fn [v] (and (:vote-granted v)
+                                               (= @term (:term v)))) votes))
+                   @majority)
+               (not= @mystate :follower) )
+        ;; TODO make sure that I can cancel candidacy if i get a hearteat)
+        (do
+          (println "i am elected leader :) " @myid)
+          (reset! mystate :leader)
+          (reset! leader @myid)
+          (reset! leader-state {:next-index (into {} (map (fn [r] [r (inc (count @log))])) @other-replicas)
+                                :match-index  (into {} (map (fn [r] [r 0])) @other-replicas)})
+          (send-heartbeat))))))
 
-              :rpc/append-entries
-              (if (>= (:term data) @term)
-                (do
-                  (reset! term (:term data))
-                  (reset! mystate :follower)
-                  (reset! leader (:leader data))
-                  (reset! last-heartbeat (now)))
-                (do
-                  (send {:type :rpc/append-entries-response :src @myid :dst (:src data)
-                         :term @term :success false}) ;; TODO check if this is right response
-                  (recur votes)))
-              
-              
-              (do
-                (respond data)
-                (recur votes)))))))))
 
+(def external-requests (atom []))
+(def rpc-requests (atom []))
+
+(add-watch external-requests :external-requests
+           (fn [k r o n]
+             (println "external-requests" n)
+             n))
+
+(add-watch rpc-requests :rpc-requests
+           (fn [k r o n]
+             (println "rpc" n)
+             n))
+
+(defn read-loop []
+  (loop []
+    (let [data (receive)]
+      (case data
+        :timeout (recur)
+        (let [data (json/parse-string data keyword)]
+          (let [t (:term data)]
+            (when (> t @term)
+              (reset! term t)
+              (reset! mystate :follower)
+              (reset! leader (:src data))
+              (reset! last-heartbeat (now))))
+          
+          (case (keyword (:type data))
+            :rpc/request (swap! rpc-requests conj data)
+            :rpc/response (swap! rpc-response assoc (:rpc/mid data) data)
+            (swap! external-requests conj data))
+          
+          (recur))))))
 
 (defn -main [myport myidd & replicaids]
   (reset! socket (DatagramSocket. 0))
@@ -229,14 +262,32 @@
   (reset! myid myidd)
   (reset! majority (inc (quot (inc (count replicaids)) 2)))
   (reset! other-replicas (set replicaids))
+  
+  
   (send {:src @myid :dst "FFFF" :type "hello"})
+  
+  
+  (future (read-loop))
+  (future (loop []
+            (when (and (not= @mystate :leader)
+                       (> (- (now) @last-heartbeat) timeout-ms))
+              (start-election))
+            
+            (Thread/sleep 10)
+            (recur)))
+  (future (loop []
+            (when (not-empty @rpc-requests)
+              (let [req (first @rpc-requests)]
+                (swap! rpc-requests rest)
+                (respond-rpc req)))
+            (Thread/sleep 10)
+            (recur)))
+  
   (while true
-    (when (and (not= @mystate :leader)
-               (> (- (now) @last-heartbeat) timeout-ms))
-      (start-election))
-    (let [data (receive)]
-      (if (not= data :timeout)
-        (respond (json/parse-string data keyword))))))
+    (when (not-empty @external-requests)
+      (respond (first @external-requests))
+      (swap! external-requests rest))
+    (Thread/sleep 10)))
 
 "TODO
 Current terms are exchanged
