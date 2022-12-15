@@ -96,16 +96,12 @@
         data (assoc data :rpc/mid mid :type :rpc/response
                     :src @myid :dst (:src req))]
     
-    (println "RPC SEND" data)
-    
     (send data)))
 
 (def rpc-response (atom {}))
 (defn send-rpc [method data]
   (let [mid (str (java.util.UUID/randomUUID))
         data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)]
-    (println "RPC SEND" data)
-    
     (send data)
     
     (loop []
@@ -189,15 +185,12 @@
 (defn start-election []
   (assert (= @mystate :follower) )
   (when (not= @voted-for-term @term)
-    (println "starting election, term" (inc @term) "voted-for" @voted-for-term)
-    (println "starting election" (inc @term))
     (swap! term inc)
     (reset! mystate :candidate)
     (reset! voted-for @myid)
     (reset! voted-for-term @term)
     
     (let [votes (vec (pmap (fn [dst]
-                             (println "asking for vote from " dst)
                              (send-rpc :rpc/request-vote
                                        {:dst dst
                                         :term @term
@@ -205,9 +198,6 @@
                                         :last-log-index (count @data)
                                         :last-log-term @term}))
                            (vec @other-replicas)))]
-      (println "votes!!" votes)
-      (logf "votes" votes)
-      (println "mystate" @mystate)
       (if (and (>= (count (filter (fn [v] (and (:vote-granted v)
                                                (= @term (:term v)))) votes))
                    @majority)
@@ -232,7 +222,6 @@
 
 (add-watch rpc-requests :rpc-requests
            (fn [k r o n]
-             (println "rpc" n)
              n))
 
 (defn read-loop []
@@ -241,17 +230,14 @@
       (case data
         :timeout (recur)
         (let [data (json/parse-string data keyword)]
-          (let [t (:term data)]
-            (when (> t @term)
-              (reset! term t)
-              (reset! mystate :follower)
-              (reset! leader (:src data))
-              (reset! last-heartbeat (now))))
           
+          (logf (str "received" @myid) data)
           (case (keyword (:type data))
             :rpc/request (swap! rpc-requests conj data)
             :rpc/response (swap! rpc-response assoc (:rpc/mid data) data)
-            (swap! external-requests conj data))
+            (do
+              (println "external request" data)
+              (swap! external-requests conj data)))
           
           (recur))))))
 
@@ -262,6 +248,8 @@
   (reset! myid myidd)
   (reset! majority (inc (quot (inc (count replicaids)) 2)))
   (reset! other-replicas (set replicaids))
+
+  (spit (str "received" @myid) "")
   
   
   (send {:src @myid :dst "FFFF" :type "hello"})
@@ -285,6 +273,7 @@
   
   (while true
     (when (not-empty @external-requests)
+      (println "responding to external request")
       (respond (first @external-requests))
       (swap! external-requests rest))
     (Thread/sleep 10)))
