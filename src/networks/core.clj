@@ -117,6 +117,16 @@
 (defmulti respond (fn [data] (keyword (:type data))))
 
 
+(defn apply-log-entry [entry]
+  (case (:type entry)
+    "put" (swap! data assoc (:key entry) (:value entry))))
+ 
+(defn update-state-machine []
+  (let [entries (subvec @tape @last-applied (inc @commit-index))]
+    (doseq [entry entries]
+      (apply-log-entry entry)
+      (swap! last-applied inc))))
+
 (defn putget [{:keys [src dst MID] :as req} v]
   (log req)
   (cond (nil? @leader)
@@ -129,24 +139,29 @@
         :else
         (send (v))))
 
+(defn send-log-entries [answers dst]
+  "takes info from @leader-state, then sends the correct log entry for that."
+  (prn [ "leader state" @leader-state])
+  (async/>! answers
+            (send-rpc :rpc/append-entries
+                      {:dst dst
+                       :entries []
+                       :term @term
+                       :leader @myid
+                       :prev-log-index (dec (dec (count @tape)))
+                       :prev-log-term (get-in @tape [(dec (dec (count @tape))) :term])
+                       :leader-commit @commit-index})))
+
 (defn put [{:keys [src dst MID key value] :as req}]
-  (let [log-entry {:type :put :key key :value value :term @term}]
+  (let [log-entry {:type "put" :key key :value value :term @term}]
     (swap! tape conj log-entry)
 
     "this can take potentially a long time, because it might trigger entire log refilling loop.
      BUT we only block here until we get majority votes.."
     (let [append-responses (async/chan 100)]
       (doseq [dst @other-replicas]
-        (go
-          (async/>! append-responses
-                    (send-rpc :rpc/append-entries
-                              {:dst dst
-                               :entries [{:type :put :key key :value value :term @term}]
-                               :term @term
-                               :leader @myid
-                               :prev-log-index (dec (dec (count @tape)))
-                               :prev-log-term (get-in @tape [(dec (dec (count @tape))) :term])
-                               :leader-commit @commit-index}))))
+        (go (send-log-entries append-responses dst)))
+      
       (loop [received 0]
         (if (= received @majority)
           (println "got majority")
@@ -159,9 +174,9 @@
               (recur received))))))
     
     (reset! commit-index (dec (count @tape)))
+    (update-state-machine)
     
-  (swap! data assoc key value)
-  {:type "ok" :src dst :dst src :MID MID}))
+    {:type "ok" :src dst :dst src :MID MID}))
 
 (defmethod respond :get [{:keys [src dst key MID] :as req}]
   (log [@data key])
@@ -189,16 +204,6 @@
       (reset! voted-for-term term)
       (reply req {:term term :vote-granted true}))
     (reply req {:term term :vote-granted false})))
-
-(defn apply-log-entry [entry]
-  (case (:type entry)
-    "put" (swap! data assoc (:key entry) (:value entry))))
-  
-(defn update-state-machine []
-  (let [entries (subvec @tape @last-applied (inc @commit-index))]
-    (doseq [entry entries]
-      (apply-log-entry entry)
-      (swap! last-applied inc))))
 
 (defmethod respond-rpc :rpc/append-entries [{:keys [src dst prev-log-index
                                                     prev-log-term
@@ -276,12 +281,13 @@ follow it (§5.3)"
                    @majority)
                (not= @mystate :follower) )
         ;; TODO make sure that I can cancel candidacy if i get a hearteat)
+        ;; TODO add other ways that candidacy can go..
         (do
           (println "i am elected leader :) " @myid)
+          (reset! leader-state {:next-index (into {} (map (fn [r] [r (inc (count @tape))]) @other-replicas))
+                                :match-index  (into {} (map (fn [r] [r 0]) @other-replicas))})
           (reset! mystate :leader)
           (reset! leader @myid)
-          (reset! leader-state {:next-index (into {} (map (fn [r] [r (inc (count @log))])) @other-replicas)
-                                :match-index  (into {} (map (fn [r] [r 0])) @other-replicas)})
           (send-heartbeat))))))
 
 
@@ -346,7 +352,7 @@ follow it (§5.3)"
                        (> (- (now) @last-heartbeat) (/ timeout-ms 2)))
               (send-heartbeat))
             
-            (Thread/sleep 1)
+            (Thread/sleep 0)
             (recur)))
   
   (future (while true
@@ -366,13 +372,13 @@ follow it (§5.3)"
               (catch Exception e
                 (log e)
                 (println "erhm" e)))
-            (Thread/sleep 1)))
+            (Thread/sleep 0)))
   
   (while true
     (when (not-empty @external-requests)
       (let [[[req & _] _] (swap-vals! external-requests rest)]
         (respond req)))
-    (Thread/sleep 1)))
+    (Thread/sleep 0)))
 
 "TODO
 Current terms are exchanged
