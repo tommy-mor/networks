@@ -142,7 +142,13 @@
           (println "sending rpc to dst" dst)
           (async/>! append-responses
                     (send-rpc :rpc/append-entries
-                              {:dst dst :entries [{:type :put :key key :value value :term @term}]}))
+                              {:dst dst
+                               :entries [{:type :put :key key :value value :term @term}]
+                               :term @term
+                               :leader @myid
+                               :prev-log-index (dec (count @tape))
+                               :prev-log-term (get-in @tape [(dec (count @tape)) :term])
+                               :leader-commit @commit-index}))
           (println "done")))
       (loop []
         (println "response from channel DEBUG" (async/<!! append-responses))
@@ -157,7 +163,7 @@
 
 (defmethod respond :put [{:keys [src dst MID key value] :as req} ]
   (putget req
-          (put req)))
+          (fn [] (put req))))
 
 (defmulti respond-rpc (fn [data] (keyword (:rpc/method data))))
 
@@ -173,7 +179,9 @@
       (reply req {:term term :vote-granted true}))
     (reply req {:term term :vote-granted false})))
 
-(defmethod respond-rpc :rpc/append-entries [{:keys [src dst MID prev-log-index prev-log-term entries leader-commit] :as req}]
+(defmethod respond-rpc :rpc/append-entries [{:keys [src dst prev-log-index
+                                                    prev-log-term
+                                                    entries leader-commit] :as req}]
   (println "mystate appendentries" @mystate)
   (if-not (= @mystate :follower) (while true (println "should not be possible!!")
                                         (System/exit 1)))
@@ -183,6 +191,7 @@
   (log req)
   (reset! last-heartbeat (now))
   (reset! leader (:leader req))
+  ;; TODO maybe only reset this if we check the termid..
   (reset! term (:term req))
   (reply req {:term @term :success true}))
 
