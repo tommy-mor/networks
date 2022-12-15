@@ -44,8 +44,10 @@
 (def mystate (atom :follower))
 (def leader (atom nil))
 
-(def data (atom {:last-applied -1 :store {}}))
-(def tape (atom []))
+(def data (atom {:last-applied -1
+                 :store {}
+                 :tape []}))
+
 (def commit-index (atom -1))
 
 (def leader-state (atom nil))
@@ -85,8 +87,7 @@
         packet (DatagramPacket. bytes
                                 (count bytes)
                                 (java.net.InetAddress/getByName "localhost")
-                                @port
-                                )]
+                                @port)]
     (.send @socket packet)))
 
 
@@ -99,7 +100,8 @@
 (def rpc-response (atom {}))
 (defn send-rpc [method data]
   (let [mid (str (java.util.UUID/randomUUID))
-        data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)]
+        data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)
+        sent-at (now)]
     (send data)
     
     (loop []
@@ -108,9 +110,12 @@
           (do
             (swap! rpc-response dissoc mid)
             resp)
-          (do
-            (Thread/sleep 10)
-            (recur)))))))
+          (if (> (- (now) sent-at) 1000)
+            (do
+              (println "retrying!")
+              (send-rpc method data))
+            (do (Thread/sleep 1)
+                (recur))))))))
       
 
 (defmulti respond (fn [data] (keyword (:type data))))
@@ -142,7 +147,7 @@
                         (if (and (>= (count (filter (fn [[k v]] (>= v potential-index))
                                                     (:match-index new)))
                                      @majority)
-                                 (= @term (:term (get @tape potential-index))))
+                                 (= @term (:term (get-in @data [:tape potential-index]))))
                           (recur (inc potential-index))
                           (dec potential-index)))))))
 (defn apply-log-entry [m entry]
@@ -152,23 +157,21 @@
 (add-watch commit-index :apply-committed-log
            (fn [_ _ old new]
              
-             (println "comitting" old "->" new "tape" @tape @data)
-             
              (when (not= old new) 
                (swap! data
-                      (fn [m items]
+                      (fn [m]
                         {:store (reduce apply-log-entry
                                         (:store m)
-                                        items)
-                         :last-applied new})
-                      (let [items (subvec @tape (inc old) (inc new))]
-                        items)))))
+                                        (subvec (:tape m) (inc old) (inc new)))
+                         :last-applied new
+                         :tape (:tape m)})))))
 
 (defn send-log-entries [dst]
   "takes info from @leader-state, then sends the correct log entry for that."
-  (let [last-log-index (dec (count @tape))
+  (let [tape (:tape @data)
+        last-log-index (dec (count tape))
         next-index-follower (get-in @leader-state [:next-index dst])
-        entries-to-send (subvec @tape next-index-follower)]
+        entries-to-send (subvec tape next-index-follower)]
     (comment (prn [dst
                    "my last log index " last-log-index
                    "follower next index" next-index-follower
@@ -181,7 +184,7 @@
                             :term @term
                             :leader @myid
                             :prev-log-index (dec next-index-follower)
-                            :prev-log-term (get-in @tape [(dec next-index-follower) :term])
+                            :prev-log-term (get-in tape [(dec next-index-follower) :term])
                             :leader-commit @commit-index})]
         (if (:success resp)
           (swap! leader-state
@@ -193,7 +196,7 @@
 
 (defn put [{:keys [src dst MID key value] :as req}]
   (let [log-entry {:type "put" :key key :value value :term @term}]
-    (let [this-put-idx (dec (count (swap! tape conj log-entry)))]
+    (let [this-put-idx (dec (count (:tape (swap! data update-in [:tape] conj log-entry))))]
       (prn ["new log entry" log-entry])
 
       "this can take potentially a long time, because it might trigger entire log refilling loop.
@@ -203,10 +206,9 @@
           (go (send-log-entries dst))))
 
       (while (not (>= (:last-applied @data) this-put-idx))
-        (println "this-put-idx" this-put-idx)
-        (Thread/sleep 10))
+        (Thread/sleep 0))
       
-      (println "getting data!!" (get (:store @data) key) @data)
+      #_(println "getting data!!" (get (:store @data) key) @data)
       
       {:type "ok" :src dst :dst src :MID MID})))
 
@@ -243,46 +245,49 @@
   (if-not (= @mystate :follower) (while true (println "should not be possible!!")
                                         (System/exit 1)))
 
+  (logf (str "appends" @myid) (select-keys req [:prev-log-index :prev-log-term :leader-commit :entries]))
+
   "TODO 3. If an existing entry conflicts with a new one (same index
 but different terms), delete the existing entry and all that
 follow it (§5.3)"
 
-  (cond (> @term (:term req))
-        (do
-          (println "got append entries from leader with lower term")
-          (reply req {:term @term :success false}))
-        
-        (not= (get-in @tape [prev-log-index :term])
-              prev-log-term)
-        (do
-          (println "got append entries from leader with wrong prev-log-term")
-          (reply req {:term @term :success false}))
-
-        :else
-        (do
-
+  (let [tape (:tape @data)]
+    (cond (> @term (:term req))
+          (do
+            (println "got append entries from leader with lower term")
+            (reply req {:term @term :success false}))
           
-          
-          (let [new-tape (vec (concat @tape entries))]
-            (reset! commit-index (min leader-commit (dec (count new-tape))))
-            (reset! tape new-tape))
-          
-          ;; watcher should update state machine here..
-          
-          (reset! last-heartbeat (now))
-          (reset! leader (:leader req))
-          ;; TODO maybe only reset this if we check the termid..
-          (reset! term (:term req))
+          (not= (get-in tape [prev-log-index :term])
+                prev-log-term)
+          (do
+            (println "got append entries from leader with wrong prev-log-term")
+            (reply req {:term @term :success false}))
 
-          ;; TODO check things correctly here..
+          :else
+          (do
+
+            
+            
+            (let [new-tape (vec (concat tape entries))]
+              (reset! commit-index (min leader-commit (dec (count new-tape))))
+              (swap! data assoc :tape new-tape))
+            
+            ;; watcher should update state machine here..
+            
+            (reset! last-heartbeat (now))
+            (reset! leader (:leader req))
+            ;; TODO maybe only reset this if we check the termid..
+            (reset! term (:term req))
+
+            ;; TODO check things correctly here..
 
 
 
-          (reply req {:term @term :success true}))))
+            (reply req {:term @term :success true})))))
 
 (defn send-heartbeat []
   (println "sending heartbeat")
-  (send-rpc :rpc/append-entries
+  #_(send-rpc :rpc/append-entries
             {:dst "FFFF"
              :term @term :leader @myid
              
@@ -305,7 +310,7 @@ follow it (§5.3)"
                                        {:dst dst
                                         :term @term
                                         :candidate @myid
-                                        :last-log-index (count @data)
+                                        :last-log-index (count (:tape @data))
                                         :last-log-term @term}))
                            (vec @other-replicas)))]
       (if (and (>= (count (filter (fn [v] (and (:vote-granted v)
@@ -316,7 +321,7 @@ follow it (§5.3)"
         ;; TODO add other ways that candidacy can go..
         (do
           (println "i am elected leader :) " @myid)
-          (reset! leader-state {:next-index (into {} (map (fn [r] [r (count @tape)])
+          (reset! leader-state {:next-index (into {} (map (fn [r] [r (count (:tape @data))])
                                                           @other-replicas))
                                 :match-index  (into {} (map (fn [r] [r 0])
                                                             @other-replicas))})
