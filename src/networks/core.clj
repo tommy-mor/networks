@@ -99,7 +99,7 @@
 
 (def rpc-response (atom {}))
 (defn send-rpc
-  ([method data] (send-rpc method data 5 #{}))
+  ([method data] (send-rpc method data 10 #{}))
   ([method data timeout valid-responses]
    (let [mid (str (java.util.UUID/randomUUID))
          valid-responses (clojure.set/union valid-responses #{mid})
@@ -382,7 +382,7 @@ follow it (§5.3)"
 
 (defn -main [myport myidd & replicaids]
   (reset! socket (DatagramSocket. 0))
-  (.setSoTimeout @socket 10)
+  (.setSoTimeout @socket 1)
   (reset! port (Integer/parseInt myport))
   (reset! myid myidd)
   (let [replicas (filter (complement empty?) replicaids)]
