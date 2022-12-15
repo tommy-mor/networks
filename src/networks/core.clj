@@ -95,6 +95,7 @@
   (let [mid (:rpc/mid req) 
         data (assoc data :rpc/mid mid :type :rpc/response
                     :src @myid :dst (:src req))]
+    (println "responding to " "with " data)
     
     (send data)))
 
@@ -174,7 +175,8 @@
 
 (defmethod respond-rpc :rpc/append-entries [{:keys [src dst MID prev-log-index prev-log-term entries leader-commit] :as req}]
   (println "mystate appendentries" @mystate)
-  (assert (= @mystate :follower) "this should only be possible for followers")
+  (if-not (= @mystate :follower) (while true (println "should not be possible!!")
+                                        (System/exit 1)))
 
   (println "i have been told to appendentries by " src)
   
@@ -192,7 +194,8 @@
              :prev-log-index (count @data)
              :prev-log-term @term
              :entries []
-             :leader-commit (count @data)}))
+             :leader-commit (count @data)})
+  (reset! last-heartbeat (now)))
 
 (defn start-election []
   (assert (= @mystate :follower) )
@@ -201,6 +204,7 @@
     (reset! mystate :candidate)
     (reset! voted-for @myid)
     (reset! voted-for-term @term)
+    (println "other replicas" @other-replicas)
     
     (let [votes (vec (pmap (fn [dst]
                              (send-rpc :rpc/request-vote
@@ -224,11 +228,16 @@
           (send-heartbeat))))))
 
 
-(def external-requests (atom []))
-(def rpc-requests (atom []))
+(def external-requests (atom (list)))
+(def rpc-requests (atom (list)))
 
 (add-watch external-requests :external-requests
            (fn [k r o n]
+             n))
+
+(add-watch mystate :my-state
+           (fn [k r o n]
+             (println "my state changed to " n)
              n))
 
 (add-watch rpc-requests :rpc-requests
@@ -257,8 +266,9 @@
   (.setSoTimeout @socket 10)
   (reset! port (Integer/parseInt myport))
   (reset! myid myidd)
-  (reset! majority (inc (quot (inc (count replicaids)) 2)))
-  (reset! other-replicas (set replicaids))
+  (let [replicas (filter (complement empty?) replicaids)]
+    (reset! majority (inc (quot (inc (count replicas)) 2)))
+    (reset! other-replicas (set replicas)))
 
   (spit (str "received" @myid) "")
   
@@ -266,22 +276,38 @@
   (send {:src @myid :dst "FFFF" :type "hello"})
   
   
+  (future (while true
+            (println "my state is " @mystate)
+            (Thread/sleep 100)))
   (future (read-loop))
   (future (loop []
             (when (and (not= @mystate :leader)
                        (> (- (now) @last-heartbeat) timeout-ms))
               (start-election))
             
+            (when (and (= @mystate :leader)
+                       (> (- (now) @last-heartbeat) (/ timeout-ms 2)))
+              (send-heartbeat))
+            
             (Thread/sleep 10)
             (recur)))
+  
   (future (while true
-            (println "rpc-requests" @rpc-requests)
             (try
               
               (when (not-empty @rpc-requests)
                 (let [req (first @rpc-requests)]
-                  (println "responding to rpc request" req)
                   (swap! rpc-requests rest)
+                  
+                  (when (and (:term req)
+                             (> (:term req) @term))
+                    (reset! term (:term req))
+                    (println "i am a follower now, saw term" @term)
+                    (reset! mystate :follower)
+                    (reset! leader (:src req)))
+                  
+                  (reset! last-heartbeat (now))
+                  (println "responding to rpc request" req)
                   (respond-rpc req)))
               (catch Exception e
                 (log e)
