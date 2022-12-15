@@ -99,7 +99,7 @@
 
 (def rpc-response (atom {}))
 (defn send-rpc
-  ([method data] (send-rpc method data 100 #{}))
+  ([method data] (send-rpc method data 5 #{}))
   ([method data timeout valid-responses]
    (let [mid (str (java.util.UUID/randomUUID))
          valid-responses (clojure.set/union valid-responses #{mid})
@@ -351,7 +351,7 @@ follow it (§5.3)"
 
 (add-watch external-requests :external-requests
            (fn [k r o n]
-             (logf "reqs" (count @external-requests))
+             (logf "reqs" (count n))
              n))
 
 (add-watch mystate :my-state
@@ -361,6 +361,7 @@ follow it (§5.3)"
 
 (add-watch rpc-requests :rpc-requests
            (fn [k r o n]
+             (logf (str "rpc" @myid) (count n))
              n))
 
 (defn read-loop []
@@ -435,6 +436,8 @@ follow it (§5.3)"
         (try 
           (respond req)
           (catch Exception e
+            (while true
+              (println "exception!!!"))
             (println "erhmreq" e)))))
     (Thread/sleep 0)))
 
