@@ -112,35 +112,40 @@
                 (println "giving up on rpc")
                 (swap! crashed conj (:dst data))
                 :timed-out)))
-   (let [data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)
-         dst (:dst data)
-         sent-at (now)]
 
-     (swap! dst->last-sent assoc dst (now))
-     (send data)
+   (swap! dst->last-sent assoc (:dst data) (now))
+   
+   (if (> (or (@dst->timeout (:dst data))
+              0) (* rpc-timeout (Math/pow 2 6)))
+     (do (println "timed out") :timed-out)
+     (let [data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)
+           dst (:dst data)
+           sent-at (now)]
 
-     (loop []
-       (let [responses @rpc-response
-             resp (get responses mid)
-             timeout (or (@dst->timeout (:dst data))
-                         (do
-                           (swap! dst->timeout assoc (:dst data) rpc-timeout)
-                           rpc-timeout))]
-         (if resp
-           (do
-             (swap! dst->timeout assoc (:dst data) rpc-timeout)
-             (swap! rpc-response dissoc mid)
-             #_(println "received mid" mid)
-             resp)
-           (if (> (- (now) sent-at) timeout)
+       (send data)
+
+       (loop []
+         (let [responses @rpc-response
+               resp (get responses mid)
+               timeout (or (@dst->timeout (:dst data))
+                           (do
+                             (swap! dst->timeout assoc (:dst data) rpc-timeout)
+                             rpc-timeout))]
+           (if resp
              (do
-               #_(println mid "retrying! timeout " timeout (:dst data))
-               (swap! dst->timeout update (:dst data) * 2)
-               (Thread/sleep 1)
-               
-               (send-rpc method data mid))
-             (do (Thread/sleep 1)
-                 (recur)))))))))
+               (swap! dst->timeout assoc (:dst data) rpc-timeout)
+               (swap! rpc-response dissoc mid)
+               #_(println "received mid" mid)
+               resp)
+             (if (> (- (now) sent-at) timeout)
+               (do
+                 (println mid "retrying! timeout " timeout (:dst data))
+                 (swap! dst->timeout update (:dst data) * 2)
+                 (Thread/sleep 1)
+                 
+                 (send-rpc method data mid))
+               (do (Thread/sleep 1)
+                   (recur))))))))))
       
 
 (defmulti respond (fn [data] (keyword (:type data))))
