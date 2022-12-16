@@ -98,30 +98,28 @@
     (send data)))
 
 (def rpc-response (atom {}))
-(def rpc-timeout 20)
+(def rpc-timeout 30)
 (def dst->timeout (atom {}))
 
 (def dst->last-sent (atom {}))
 
+(def superceded (atom {}))
+
 (defn send-rpc
   ([method data] (send-rpc method data (str (java.util.UUID/randomUUID))))
   ([method data mid]
-   (comment (if (or (get @crashed (:dst data))
-                    (> timeout (* rpc-timeout (Math/pow 2 6))))
-              (do
-                (println "giving up on rpc")
-                (swap! crashed conj (:dst data))
-                :timed-out)))
-
    (swap! dst->last-sent assoc (:dst data) (now))
    
    (if (> (or (@dst->timeout (:dst data))
               0) (* rpc-timeout (Math/pow 2 6)))
-     (do (println "timed out") :timed-out)
-     (let [data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)
-           dst (:dst data)
-           sent-at (now)]
+     (do (println "timed out" (:dst data))
+         :timed-out)
+     (let [sent-at (now)
+           data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request :sent sent-at)
+           dst (:dst data)]
 
+       (if (not= mid (second (get @superceded [method dst]))) ;; dont rewrite time for self
+        (swap! superceded assoc [method dst] [sent-at mid]))
        (send data)
 
        (loop []
@@ -139,11 +137,17 @@
                resp)
              (if (> (- (now) sent-at) timeout)
                (do
-                 (println mid "retrying! timeout " timeout (:dst data))
-                 (swap! dst->timeout update (:dst data) * 2)
-                 (Thread/sleep 1)
-                 
-                 (send-rpc method data mid))
+                 (if (let [evidence (get @superceded [method dst])]
+                       (and evidence (> (first evidence) sent-at)))
+                   (do (println (str mid "i am superceded, skipping"))
+                       :timed-out)
+                   (do
+                     
+                     (println mid "retrying! timeout " timeout (:dst data))
+                     (swap! dst->timeout update (:dst data) * 3)
+                     (Thread/sleep 1)
+                     
+                     (send-rpc method data mid))))
                (do (Thread/sleep 1)
                    (recur))))))))))
       
@@ -224,7 +228,7 @@
               (swap! leader-state
                      (fn [st]
                        (-> st
-                           (assoc-in [:next-index dst] (max ;; {{ TODO THIS IS WRONG, update to front (last-log-index) not next followr. need to fix concat code tho..}}
+                           (assoc-in [:next-index dst] (max
                                                         (get-in st [:next-index dst])
                                                         (inc last-log-index)))
                            (assoc-in [:match-index dst] (max
@@ -232,7 +236,7 @@
                                                          last-log-index)))))
 
               (= :timed-out resp)
-              (println "timed out")
+              (println "timed out" dst)
 
               :else
 
@@ -311,6 +315,9 @@
 (defmethod respond-rpc :rpc/append-entries [{:keys [src dst prev-log-index
                                                     prev-log-term
                                                     entries leader-commit] :as req}]
+  (if (>= (count (:tape @data)) 60 )
+    (do (logf (str "tape" @myid) (:tape @data))
+        #_(System/exit 1)))
   (reset! last-heartbeat (now))
   (if (and (= (:term req) @term)
            (= @mystate :candidate))
@@ -334,8 +341,9 @@ follow it (§5.3)"
            (not= (get-in tape [prev-log-index :term])
                  prev-log-term))
           (do
-            (println "fail: got append entries from leader with wrong prev-log-term"
-                     @term " " prev-log-index "tape" (get-in tape [prev-log-index]) "tape" (get-in tape [prev-log-index]))
+            (println (str (:rpc/mid req)
+                          "fail: got append entries from leader with wrong prev-log-term"
+                          "term: "@term " pli:" prev-log-index "tape" (get-in tape [prev-log-index]) "tape" (get-in tape [prev-log-index])))
             (reply req {:term @term :success false :my-latest (dec (count tape))}))
 
           :else
@@ -367,15 +375,17 @@ follow it (§5.3)"
     (if (or
          first-elected?
          (> (- (now) (@dst->last-sent dst)) (/ timeout-ms 3)))
-      (do (println "sending heartbeat to" dst)
-         (send-rpc :rpc/append-entries
-                   {:dst dst
-                    :term @term :leader @myid
-                    
-                    :prev-log-index (:last-applied @data)
-                    :prev-log-term @term  ;; TODO make sure this is right..
-                    :entries []
-                    :leader-commit @commit-index}))
+      (let [data @data]
+        (go (do (println "sending heartbeat to" dst)
+                (send-rpc :rpc/append-entries
+                          {:dst dst
+                           :term @term :leader @myid
+                           
+                           :prev-log-index (:last-applied data)
+                           :prev-log-term (if (not-empty (:tape data))
+                                              (:term (nth (:tape data) (:last-applied data))))
+                           :entries []
+                           :leader-commit @commit-index}))))
       )))
 
 (defn start-election []
