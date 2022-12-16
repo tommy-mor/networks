@@ -134,7 +134,7 @@
              resp)
            (if (> (- (now) sent-at) timeout)
              (do
-               #_(println mid "retrying! timeout " timeout (:dst data))
+               (println mid "retrying! timeout " timeout (:dst data))
                (swap! dst->timeout update (:dst data) * 2)
                (Thread/sleep 1)
                
@@ -232,12 +232,8 @@
               :else
 
               (do
-                (println dst "decing and retrying, they have " (:my-latest resp), "we have " last-log-index)
-                (swap! leader-state (fn [st]
-                                      (assoc-in st [:next-index dst]
-                                                (max 0
-                                                     (min (or (inc (:my-latest resp)) 999999)
-                                                          (dec (get-in st [:next-index dst])))))))
+                (println "decing and retrying, they have " (:my-latest resp), "we have " last-log-index)
+                (swap! leader-state update-in [:next-index ((:my-latest resp) dst)] dec)
                 (send-log-entries dst)))))))
 
 (defn put [{:keys [src dst MID key value] :as req}]
