@@ -57,7 +57,7 @@
 (def voted-for-term (atom nil))
 
 (def last-heartbeat (atom (now)))
-(def timeout-ms (rand-nth (range 150 300)))
+(def timeout-ms (rand-nth (range 1500 3000)))
 
 (println "timeout-ms" timeout-ms)
 (def majority (atom nil))
@@ -65,7 +65,7 @@
 ;; (String. (to-byte-arrays (json/write-str {:type :connect :port 3000})))
 
 (defn receive []
-  (let [buf (byte-array 1024)
+  (let [buf (byte-array (* 1024 10))
         packet (DatagramPacket. buf (count buf))]
     
     (try (do
@@ -98,38 +98,49 @@
     (send data)))
 
 (def rpc-response (atom {}))
-(def rpc-timeout 10)
-(def crashed (atom #{}))
-(defn send-rpc
-  ([method data] (send-rpc method data rpc-timeout #{}))
-  ([method data timeout valid-responses]
-   (reset! last-heartbeat (now))
-   (if (or (get @crashed (:dst data))
-           (> timeout (* rpc-timeout (Math/pow 2 4))))
-     (do
-       (println "giving up on rpc")
-       (swap! crashed conj (:dst data))
-       :timed-out)
-     (let [mid (str (java.util.UUID/randomUUID))
-           valid-responses (clojure.set/union valid-responses #{mid})
-           data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)
-           sent-at (now)]
-       (send data)
+(def rpc-timeout 20)
+(def dst->timeout (atom {}))
 
-       (loop []
-         (let [responses @rpc-response
-               k (first (clojure.set/intersection valid-responses (set (keys responses))))
-               resp (get responses k)]
-           (if resp
+(def dst->last-sent (atom {}))
+
+(defn send-rpc
+  ([method data] (send-rpc method data (str (java.util.UUID/randomUUID))))
+  ([method data mid]
+   (comment (if (or (get @crashed (:dst data))
+                    (> timeout (* rpc-timeout (Math/pow 2 6))))
+              (do
+                (println "giving up on rpc")
+                (swap! crashed conj (:dst data))
+                :timed-out)))
+   (let [data (assoc data :rpc/mid mid :rpc/method method :src @myid :type :rpc/request)
+         dst (:dst data)
+         sent-at (now)]
+
+     (swap! dst->last-sent assoc dst (now))
+     (send data)
+
+     (loop []
+       (let [responses @rpc-response
+             resp (get responses mid)
+             timeout (or (@dst->timeout (:dst data))
+                         (do
+                           (swap! dst->timeout assoc (:dst data) rpc-timeout)
+                           rpc-timeout))]
+         (if resp
+           (do
+             (swap! dst->timeout assoc (:dst data) rpc-timeout)
+             (swap! rpc-response dissoc mid)
+             #_(println "received mid" mid)
+             resp)
+           (if (> (- (now) sent-at) timeout)
              (do
-               (swap! rpc-response dissoc mid)
-               resp)
-             (if (> (- (now) sent-at) timeout)
-               (do
-                 (println "retrying! timeout " timeout (:dst data))
-                 (send-rpc method data (* 2 timeout) valid-responses))
-               (do (Thread/sleep 1)
-                   (recur))))))))))
+               (println mid "retrying! timeout " timeout (:dst data))
+               (swap! dst->timeout update (:dst data) * 1.5)
+               (Thread/sleep 1)
+               
+               (send-rpc method data mid))
+             (do (Thread/sleep 1)
+                 (recur)))))))))
       
 
 (defmulti respond (fn [data] (keyword (:type data))))
@@ -206,16 +217,18 @@
               (swap! leader-state
                      (fn [st]
                        (-> st
-                           (assoc-in [:next-index dst] (inc last-log-index))
-                           (assoc-in [:match-index dst] last-log-index))))
+                           (assoc-in [:next-index dst] (inc next-index-follower))
+                           (assoc-in [:match-index dst] next-index-follower))))
 
               (= :timed-out resp)
               (println "timed out")
 
               :else
-              
-              (while true (println "FAILED APPENDENTRIES, dec next-index and retry")
-                     (Thread/sleep 100)))))))
+
+              (do
+                (println "decing and retrying")
+                (swap! leader-state update-in [:next-index dst] dec)
+                (send-log-entries dst)))))))
 
 (defn put [{:keys [src dst MID key value] :as req}]
   (let [log-entry {:type "put" :key key :value value :term @term}
@@ -283,8 +296,11 @@
 (defmethod respond-rpc :rpc/append-entries [{:keys [src dst prev-log-index
                                                     prev-log-term
                                                     entries leader-commit] :as req}]
-  (if-not (= @mystate :follower) (while true (println "should not be possible!!")
-                                        (System/exit 1)))
+  (reset! last-heartbeat (now))
+  (if (and (= (:term req) @term)
+           (= @mystate :candidate))
+    (reset! mystate :follower)
+    (reset! leader src))
 
   (logf (str "appends" @myid) (select-keys req [:prev-log-index :prev-log-term :leader-commit :entries]))
 
@@ -292,7 +308,6 @@
 but different terms), delete the existing entry and all that
 follow it (§5.3)"
 
-  (reset! last-heartbeat (now))
   (let [tape (:tape @data)]
     (cond (> @term (:term req))
           (do
@@ -304,8 +319,8 @@ follow it (§5.3)"
            (not= (get-in tape [prev-log-index :term])
                  prev-log-term))
           (do
-            (println "fail: got append entries from leader with wrong prev-log-term"
-                     tape prev-log-index)
+            (println "fail: got append entries from leader with wrong prev-log-termu"
+                     @term " " prev-log-index "tape" (get-in tape [prev-log-index]) "tape" (get-in tape [prev-log-index]))
             (reply req {:term @term :success false}))
 
           :else
@@ -330,18 +345,21 @@ follow it (§5.3)"
 
             (reply req {:term @term :success true})))))
 
-(defn send-heartbeat []
-  (println "sending heartbeat")
-  (reset! last-heartbeat (now))
-  (send-rpc :rpc/append-entries
-            {:dst "FFFF"
-             :term @term :leader @myid
-             
-             :prev-log-index (:last-applied @data)
-             :prev-log-term @term  ;; TODO make sure this is right..
-             :entries []
-             :leader-commit @commit-index}))
-
+(defn send-heartbeat [first-elected?]
+  (doseq [dst @other-replicas]
+    (if (or
+         first-elected?
+         (> (- (now) (@dst->last-sent dst)) (/ timeout-ms 3)))
+      (do (println "sending heartbeat to" dst)
+         (send-rpc :rpc/append-entries
+                   {:dst dst
+                    :term @term :leader @myid
+                    
+                    :prev-log-index (:last-applied @data)
+                    :prev-log-term @term  ;; TODO make sure this is right..
+                    :entries []
+                    :leader-commit @commit-index}))
+      )))
 
 (defn start-election []
   (assert (= @mystate :follower))
@@ -353,30 +371,42 @@ follow it (§5.3)"
 
     (println "started election in term" @term)
     ;; TODO pmap never finishes, so we cant win
-    (let [votes (vec (pmap (fn [dst]
-                             (send-rpc :rpc/request-vote
-                                       {:dst dst
-                                        :term @term
-                                        :candidate @myid
-                                        :last-log-index (:last-applied @data)
-                                        :last-log-term @term}))
-                           (vec @other-replicas)))]
-      (if (and (>= (count (filter (fn [v] (and (:vote-granted v)
-                                               (= @term (:term v)))) votes))
-                   @majority)
-               (not= @mystate :follower) )
-        ;; TODO make sure that I can cancel candidacy if i get a hearteat)
-        ;; TODO add other ways that candidacy can go..
-        (do
-          (println "i am elected leader :) " @myid)
-          (reset! leader-state {:next-index (into {} (map (fn [r] [r (count (:tape @data))])
-                                                          @other-replicas))
-                                :match-index  (into {} (map (fn [r] [r 0])
-                                                            @other-replicas))})
-          (reset! mystate :leader)
-          (reset! leader @myid)
-          (send-heartbeat))
-        (println "election failed")))))
+    (let [votes (async/chan 100)]
+      
+      (doseq [dst (vec @other-replicas)]
+        (go (async/>! votes
+                      (send-rpc :rpc/request-vote
+                                {:dst dst
+                                 :term @term
+                                 :candidate @myid
+                                 :last-log-index (:last-applied @data)
+                                 :last-log-term @term}))))
+
+      (let [tally (loop [votes-received []]
+                    (println "votes recieved" votes-received)
+                    (if (and (>= (count (filter (fn [v] (and (:vote-granted v)
+                                                             (= @term (:term v)))) votes-received))
+                                 @majority))
+                      :win
+                      (if (not= @mystate :candidate)
+                        :lose
+                        (recur (conj votes-received (async/<!! votes))))))]
+
+        
+            ;; TODO make sure that I can cancel candidacy if i get a hearteat)
+            ;; TODO add other ways that candidacy can go..
+        
+        (if (= tally :win)
+            (do
+              (println "i am elected leader :) " @myid)
+              (reset! leader-state {:next-index (into {} (map (fn [r] [r (count (:tape @data))])
+                                                              @other-replicas))
+                                    :match-index  (into {} (map (fn [r] [r 0])
+                                                                @other-replicas))})
+              (reset! mystate :leader)
+              (reset! leader @myid)
+              (send-heartbeat true))
+          (println "election failed"))))))
 
 
 (def external-requests (atom (list)))
@@ -394,12 +424,13 @@ follow it (§5.3)"
 
 (add-watch rpc-requests :rpc-requests
            (fn [k r o n]
-             (logf (str "rpc" @myid) (count n))
+             (logf (str "rpc" @myid) n)
              n))
 
 (defn read-loop []
   (loop []
     (let [data (receive)]
+      (logf (str "before" @myid) data)
       (case data
         :timeout (recur)
         (let [data (json/parse-string data keyword)]
@@ -428,41 +459,39 @@ follow it (§5.3)"
   (send {:src @myid :dst "FFFF" :type "hello"})
   
   
-  (comment (future (while true
-                     (println "my state is " @mystate)
-                     (Thread/sleep 100))))
-  (future (read-loop))
-  (future (loop []
-            (when (and (not= @mystate :leader)
-                       (> (- (now) @last-heartbeat) timeout-ms))
-              (println "starting election")
-              (start-election))
-            
-            (when (and (= @mystate :leader)
-                       (> (- (now) @last-heartbeat) (/ timeout-ms 2)))
-              (send-heartbeat))
-            
-            (Thread/sleep 10)
-            (recur)))
-  
-  (future (while true
-            (try
-              
-              (when (not-empty @rpc-requests)
-                (let [[[req & _ ] _] (swap-vals! rpc-requests rest )]
-                  (when (and (:term req)
-                             (> (:term req) @term))
-                    (reset! term (:term req))
-                    (println "i am a follower now, saw term" @term)
-                    (reset! mystate :follower)
-                    (reset! voted-for nil))
+  (comment (async/thread (while true
+                           (println "my state is " @mystate)
+                           (Thread/sleep 100))))
+  (async/thread (read-loop))
+  (async/thread (loop []
+                  (when (and (not= @mystate :leader)
+                             (> (- (now) @last-heartbeat) timeout-ms))
+                    (println "starting election")
+                    (start-election))
                   
-                  (reset! last-heartbeat (now))
-                  (respond-rpc req)))
-              (catch Exception e
-                (log e)
-                (println "erhm" e)))
-            (Thread/sleep 0)))
+                  (when (= @mystate :leader) (send-heartbeat false))
+                  
+                  (Thread/sleep 1)
+                  (recur)))
+  
+  (async/thread (while true
+                  (try
+                    
+                    (when (not-empty @rpc-requests)
+                      (let [[[req & _ ] _] (swap-vals! rpc-requests rest )]
+                        (when (and (:term req)
+                                   (> (:term req) @term))
+                          (reset! term (:term req))
+                          (println "i am a follower now, saw term" @term)
+                          (reset! mystate :follower)
+                          (reset! voted-for nil))
+                        
+                        (reset! last-heartbeat (now))
+                        (respond-rpc req)))
+                    (catch Exception e
+                      (log e)
+                      (println "erhm" e)))
+                  (Thread/sleep 0)))
   
   (while true
     (when (not-empty @external-requests)
